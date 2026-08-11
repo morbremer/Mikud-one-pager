@@ -17,27 +17,27 @@ export default function BalloonTrapAlert({ externalDebts }) {
   const totalBalloonDebt = balloonLoans.reduce((s, d) => s + (d.remaining_balance || 0), 0);
 
   return (
-    <Card className="rounded-2xl sm:rounded-3xl border border-orange-300 bg-orange-50 shadow-xl overflow-hidden">
+    <Card className="rounded-2xl sm:rounded-3xl border border-red-300 bg-red-50 shadow-sm overflow-hidden">
       <CardContent className="p-5 sm:p-6">
         <div className="flex items-start gap-3">
-          <div className="w-10 h-10 bg-orange-500 rounded-xl flex items-center justify-center flex-shrink-0">
-            <Bomb className="w-6 h-6 text-white" />
+          <div className="w-10 h-10 bg-red-100 rounded-full flex items-center justify-center flex-shrink-0">
+            <Bomb className="w-6 h-6 text-red-600" />
           </div>
           <div className="flex-1">
-            <h3 className="font-semibold text-orange-900 text-lg mb-1">
+            <h3 className="font-semibold text-red-900 text-lg mb-1">
               ⚠️ פצצת זמן תזרימית זוהתה!
             </h3>
-            <p className="text-orange-800 text-sm mb-3">
+            <p className="text-red-800 text-sm mb-3">
               זוהו <strong>{balloonLoans.length} הלוואות חשודות כגרייס/בלון</strong> – תשלומי ריבית בלבד.
               סכום הקרן שייפרע בבת אחת: <strong>₪{totalBalloonDebt.toLocaleString()}</strong>
             </p>
 
             <div className="space-y-2 mb-4">
               {balloonLoans.map((loan, i) => (
-                <div key={i} className="bg-white border border-orange-200 rounded-lg p-3 flex justify-between items-center text-sm">
+                <div key={i} className="bg-white border border-red-200 rounded-lg p-3 flex justify-between items-center text-sm">
                   <div>
                     <p className="font-semibold text-mist-900">{loan.creditor || 'הלוואה ' + (i+1)}</p>
-                    <p className="text-xs text-orange-700">
+                    <p className="text-xs text-red-700">
                       החזר חודשי: ₪{loan.monthly_repayment?.toLocaleString()} |
                       יחס לקרן: {((loan.monthly_repayment / loan.remaining_balance) * 100).toFixed(2)}%
                       <span className="text-red-600 font-bold"> · ריבית בלבד</span>
@@ -51,9 +51,9 @@ export default function BalloonTrapAlert({ externalDebts }) {
               ))}
             </div>
 
-            <div className="bg-orange-100 border border-orange-300 rounded-xl p-3 flex items-start gap-2">
-              <Clock className="w-4 h-4 text-orange-700 flex-shrink-0 mt-0.5" />
-              <p className="text-xs text-orange-900 font-semibold">
+            <div className="bg-white border border-red-200 rounded-xl p-3 flex items-start gap-2">
+              <Clock className="w-4 h-4 text-red-700 flex-shrink-0 mt-0.5" />
+              <p className="text-xs text-red-900 font-semibold">
                 המלצה: אחד הלוואות אלו לתוך המשכנתא החדשה עכשיו – לפני שתצטרך לשלם ₪{totalBalloonDebt.toLocaleString()} בבת אחת.
                 המשכנתא לכל מטרה תפרוס את החוב הזה על 20+ שנה ותחסוך לך לחץ תזרימי חמור.
               </p>

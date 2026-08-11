@@ -14,7 +14,7 @@ import {
 } from '@/utils/refinanceMixState';
 import {
   Upload, Loader2, DollarSign,
-  CheckCircle, AlertCircle, TrendingUp, X, ChevronDown, ChevronUp, ChevronLeft, Download, Sparkle
+  CheckCircle, AlertCircle, TrendingUp, X, ChevronDown, ChevronUp, ChevronLeft, Download, Sparkle, Sparkles
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import RefinanceCalculator from '@/components/refinance/RefinanceCalculator';
@@ -315,6 +315,12 @@ export default function RefinanceQuickCheck() {
     () => analysisResult ? buildHeadline(analysisResult) : null,
     [analysisResult]
   );
+  const hasIndexTopic = useMemo(() => {
+    const hasLinkedTracks = analysisResult?.currentLoan?.tracks?.some(
+      (track) => track.track_type?.toLowerCase().includes('צמוד') || track.track_type?.toLowerCase().includes('linked')
+    );
+    return !!hasLinkedTracks || (analysisResult?.savings?.indexDamageAlerts?.length > 0);
+  }, [analysisResult]);
   const refinanceMixes = useMemo(
     () => buildRefinanceMixCards(strategyMixes),
     [strategyMixes]
@@ -1244,35 +1250,76 @@ export default function RefinanceQuickCheck() {
                     initial={{ height: 0, opacity: 0 }}
                     animate={{ height: 'auto', opacity: 1 }}
                     exit={{ height: 0, opacity: 0 }}
-                    className="overflow-hidden space-y-6"
+                    className="overflow-hidden"
                   >
-                    <div className="p-6 sm:p-8 border border-mist-100 rounded-2xl sm:rounded-3xl bg-white space-y-6">
-                      <h3 className="text-xl font-semibold text-[#0C084A] text-center mb-4">ניתוח משכנתא מעמיק</h3>
+                    <div className="rounded-2xl border border-mist-100 bg-white p-5 shadow-sm sm:rounded-3xl sm:p-8 space-y-6">
+                      <div className="text-center">
+                        <h3 className="m-0 flex items-center justify-center gap-2 text-[clamp(16px,4vw,20px)] font-semibold text-[#0C084A]">
+                          <Sparkles className="h-5 w-5 text-[#0153F4]" />
+                          ניתוח משכנתא מעמיק
+                        </h3>
+                        <p className="mt-2 text-xs sm:text-sm text-mist-500">
+                          פירוט מלא של המסלולים הקיימים, השפעת המדד על התשלומים, וסיכונים תזרימיים שכדאי להכיר לפני החלטה
+                        </p>
+                      </div>
 
                       {/* פירוט המסלולים הקיימים */}
                       {analysisResult.currentLoan.tracks && analysisResult.currentLoan.tracks.length > 0 && (
-                        <Card className="border border-mist-200 bg-white">
-                          <CardHeader className="pb-2"><CardTitle className="text-sm text-mist-500">פירוט מסלולים קיימים</CardTitle></CardHeader>
-                          <CardContent>
-                            <div className="space-y-2">
-                              {analysisResult.currentLoan.tracks.map((track, i) => (
-                                <div key={i} className="bg-mist-50 p-3 rounded-lg border border-mist-200 text-sm">
-                                  <div className="flex justify-between items-center mb-1">
-                                    <span className="font-bold text-mist-900">{track.track_type}</span>
-                                    <span className="text-red-600 font-bold">{track.interest_rate?.toFixed(2)}%</span>
-                                  </div>
-                                  <div className="flex justify-between text-xs text-mist-500">
-                                    <span>יתרה: ₪{track.remaining_balance?.toLocaleString()}</span>
-                                    <span>נותרו: {track.remaining_months} חודשים</span>
-                                  </div>
+                        <div className="rounded-2xl border border-mist-200 bg-white p-4 sm:p-6 sm:rounded-3xl">
+                          <h4 className="mb-3 text-base sm:text-lg font-semibold text-[#0C084A]">פירוט מסלולים קיימים</h4>
+                          <div className="space-y-2">
+                            {analysisResult.currentLoan.tracks.map((track, i) => (
+                              <div key={i} className="bg-mist-50 p-3 rounded-lg border border-mist-200 text-sm">
+                                <div className="flex justify-between items-center mb-1">
+                                  <span className="font-bold text-mist-900">{track.track_type}</span>
+                                  <span className="text-red-600 font-bold">{track.interest_rate?.toFixed(2)}%</span>
                                 </div>
-                              ))}
-                            </div>
-                          </CardContent>
-                        </Card>
+                                <div className="flex justify-between text-xs text-mist-500">
+                                  <span>יתרה: ₪{track.remaining_balance?.toLocaleString()}</span>
+                                  <span>נותרו: {track.remaining_months} חודשים</span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
                       )}
 
-                      <RefinanceCalculator currentLoan={analysisResult.currentLoan} />
+                      {/* השפעת המדד: תחזית עתידית + נזק שכבר נגרם */}
+                      {hasIndexTopic && (
+                        <div className="space-y-4">
+                          <h4 className="text-base sm:text-lg font-semibold text-[#0C084A]">📉 השפעת המדד על המשכנתא</h4>
+
+                          <RefinanceCalculator currentLoan={analysisResult.currentLoan} />
+
+                          {analysisResult.savings?.indexDamageAlerts?.length > 0 && (
+                            <div className="rounded-2xl border border-red-300 bg-red-50 p-5 sm:rounded-3xl sm:p-6">
+                              <div className="mb-3 flex items-center gap-2 font-semibold text-red-700">
+                                <AlertCircle className="h-5 w-5" />
+                                🔥 נזק המדד - כמה כסף "נשרף" בגלל ההצמדה
+                              </div>
+                              <p className="mb-3 text-sm text-mist-500">המסלולים הצמודים למדד גורמים לתשלום נוסף שאינו נראה בתשלום החודשי הנוכחי:</p>
+                              <div className="space-y-3">
+                                {analysisResult.savings.indexDamageAlerts.map((alert, i) => (
+                                  <div key={i} className="bg-white rounded-lg p-3 border border-red-200">
+                                    <div className="flex justify-between items-center">
+                                      <span className="font-semibold text-mist-900">{alert.track_type}</span>
+                                      <span className="text-2xl font-black text-red-600">+₪{alert.indexDamage?.toLocaleString()}</span>
+                                    </div>
+                                    <p className="text-xs text-red-600/80 mt-1">{alert.note}</p>
+                                  </div>
+                                ))}
+                                <div className="bg-white rounded-lg p-3 border border-red-300 text-center">
+                                  <p className="text-sm font-bold text-mist-900">סך נזק המדד הכולל:</p>
+                                  <p className="text-3xl font-black text-red-600">
+                                    +₪{analysisResult.savings.indexDamageAlerts.reduce((s, a) => s + (a.indexDamage || 0), 0).toLocaleString()}
+                                  </p>
+                                  <p className="text-xs text-red-600/80 mt-1">💡 המחזור יבטל את ה"הצמדה" הזו לחלוטין ויחסוך גם כסף זה!</p>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
 
                       {/* ⚠️ Balloon Trap Alert */}
                       <BalloonTrapAlert
@@ -1624,49 +1671,6 @@ export default function RefinanceQuickCheck() {
                   </CardContent>
                 </Card>
               )}
-
-              {/* 🔥 נזק מדד - מועבר לתוך הניתוח המעמיק */}
-              <AnimatePresence>
-                {showAdvancedAnalysis && (
-                  <motion.div
-                    initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: 'auto', opacity: 1 }}
-                    exit={{ height: 0, opacity: 0 }}
-                    className="overflow-hidden space-y-6 mt-6"
-                  >
-                    {analysisResult.savings?.indexDamageAlerts?.length > 0 && (
-                      <Card className="border border-red-300 bg-red-50">
-                        <CardHeader>
-                          <CardTitle className="flex items-center gap-2 text-red-700">
-                            <AlertCircle className="w-5 h-5" />
-                            🔥 נזק המדד - כמה כסף "נשרף" בגלל ההצמדה
-                          </CardTitle>
-                        </CardHeader>
-                        <CardContent className="space-y-3">
-                          <p className="text-sm text-mist-500">המסלולים הצמודים למדד גורמים לתשלום נוסף שאינו נראה בתשלום החודשי הנוכחי:</p>
-                          {analysisResult.savings.indexDamageAlerts.map((alert, i) => (
-                            <div key={i} className="bg-white rounded-lg p-3 border border-red-200">
-                              <div className="flex justify-between items-center">
-                                <span className="font-semibold text-mist-900">{alert.track_type}</span>
-                                <span className="text-2xl font-black text-red-600">+₪{alert.indexDamage?.toLocaleString()}</span>
-                              </div>
-                              <p className="text-xs text-red-600/80 mt-1">{alert.note}</p>
-                            </div>
-                          ))}
-                          <div className="bg-white rounded-lg p-3 border border-red-300 text-center">
-                            <p className="text-sm font-bold text-mist-900">סך נזק המדד הכולל:</p>
-                            <p className="text-3xl font-black text-red-600">
-                              +₪{analysisResult.savings.indexDamageAlerts.reduce((s, a) => s + (a.indexDamage || 0), 0).toLocaleString()}
-                            </p>
-                            <p className="text-xs text-red-600/80 mt-1">💡 המחזור יבטל את ה"הצמדה" הזו לחלוטין ויחסוך גם כסף זה!</p>
-                          </div>
-                        </CardContent>
-                      </Card>
-                    )}
-
-                  </motion.div>
-                )}
-              </AnimatePresence>
 
               {mixPresentation.hasMixes && (
                 <>

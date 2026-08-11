@@ -6,7 +6,7 @@ export default function RefinanceCalculator({ currentLoan }) {
   if (!hasLinkedTracks) return null;
 
   return (
-    <div className="mb-6 border border-amber-200 rounded-xl p-6 bg-amber-50">
+    <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5 sm:rounded-3xl sm:p-6">
       <div className="flex items-start gap-4">
         <div className="w-12 h-12 bg-amber-100 rounded-xl flex items-center justify-center flex-shrink-0">
           <span className="text-2xl">📈</span>
