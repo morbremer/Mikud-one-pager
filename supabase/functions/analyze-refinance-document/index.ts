@@ -126,12 +126,7 @@ async function invokeGemini({ model, prompt, files = [], schema = null }) {
     parts.push({ inlineData: { mimeType, data } });
   }
 
-  // Every call here is structured field extraction against a fixed JSON
-  // schema — pull numbers/strings off a document, no multi-step reasoning.
-  // Leaving thinking on its default (dynamic) budget was spending latency and
-  // output tokens on internal reasoning the task never needed; disabling it
-  // is a straight win on both speed and cost, not a tradeoff between them.
-  const config = { maxOutputTokens: MAX_OUTPUT_TOKENS, thinkingConfig: { thinkingBudget: 0 } };
+  const config = { maxOutputTokens: MAX_OUTPUT_TOKENS };
   if (schema) {
     config.responseMimeType = 'application/json';
     config.responseJsonSchema = schema;
