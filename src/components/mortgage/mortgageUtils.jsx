@@ -309,41 +309,6 @@ export const calcCpiMix = (loanAmount, duration, rates, freeIncome) => {
   };
 };
 
-// ─── תמהיל דינמי לפי פרופיל הלקוח ─────────────────────────────────────────
-export const calcDynamicMix = ({ loanAmount, duration, dti, ltv, borrowers, formData, rates, ALL_PURPOSE_RATES, isSenior, isBalloon }) => {
-  const activeRates = isSenior ? ALL_PURPOSE_RATES : rates;
-  const calcPmt = (p, r, y) => {
-    if (isSenior && isBalloon) return p * r / 12;
-    return calculatePayment(p, r, y);
-  };
-
-  const age = Number(formData.age) || 40;
-  const isYoung = age < 40;
-  const isOlder = age >= 55;
-  const hasStableIncome = borrowers.some(b => (b.employmentTypes || []).includes('employee'));
-  const isHighDTI = dti > 35;
-  const isLowLTV = ltv < 65;
-
-  // חלוקה דינמית:
-  // צעיר + DTI נמוך → יותר פריים (מנצל ריבית נמוכה, זמן לספוג שינויים)
-  // מבוגר / DTI גבוה → יותר קבועה (יציבות ובטחון)
-  // LTV נמוך → יותר גמישות
-  let primePct, fixedPct, varPct;
-  if (isOlder || isHighDTI) {
-    primePct = 0.20; fixedPct = 0.50; varPct = 0.30;
-  } else if (isYoung && isLowLTV && hasStableIncome) {
-    primePct = 0.45; fixedPct = 0.30; varPct = 0.25;
-  } else {
-    primePct = 0.33; fixedPct = 0.34; varPct = 0.33;
-  }
-
-  const T1 = { name: "פריים (Prime)", amount: loanAmount * primePct, rate: activeRates.PRIME_CALC, years: duration, pmt: calcPmt(loanAmount * primePct, activeRates.PRIME_CALC, duration), desc: isBalloon ? "ריבית בלבד" : "P-0.5%" };
-  const T2 = { name: "קבועה לא צמודה (קל\"צ)", amount: loanAmount * fixedPct, rate: activeRates.FIXED_UNLINKED, years: duration, pmt: calcPmt(loanAmount * fixedPct, activeRates.FIXED_UNLINKED, duration), desc: isBalloon ? "ריבית בלבד" : "הגנה מלאה" };
-  const T3 = { name: "משתנה כל 5 שנים צמודה", amount: loanAmount * varPct, rate: activeRates.VAR_LINKED, years: duration, pmt: calcPmt(loanAmount * varPct, activeRates.VAR_LINKED, duration), desc: isBalloon ? "ריבית בלבד" : "איזון סיכון" };
-
-  return { tracks: [T1, T2, T3], total: T1.pmt + T2.pmt + T3.pmt, primePct, fixedPct, varPct };
-};
-
 export const calculateResults = ({ formData, borrowers, maxTerm = 30, rates, ALL_PURPOSE_RATES }) => {
   const price         = Number(String(formData.propertyPrice).replace(/,/g, '')) || 0;
   const eq            = Number(String(formData.equity).replace(/,/g, '')) || 0;
@@ -468,21 +433,32 @@ export const calculateResults = ({ formData, borrowers, maxTerm = 30, rates, ALL
   const balloonMonthly = isSenior && isBalloon ? loanAmount * activeRates.FIXED_UNLINKED / 12 : null;
   const regularMonthly = isSenior ? calculatePayment(loanAmount, activeRates.FIXED_UNLINKED, duration) : null;
 
-  // תמהיל B: דינמי לפי פרופיל
-  const dynamicMix = calcDynamicMix({ loanAmount, duration, dti, ltv: ltvPercent, borrowers, formData, rates, ALL_PURPOSE_RATES, isSenior, isBalloon });
-  const pmtBdynamic = dynamicMix.total;
+  // ━━━ שלושת "הסלים האחידים" (התמהילים המנדטוריים) — לפי הנחיות בנק ישראל ━━━
+  // תקופה אחידה לכל הסלים: ברירת המחדל ("כפי שמופיע בטפסים הרשמיים") היא
+  // 360 חודשים, מוגבלת רק לפי גיל — maxTerm כבר מייצג את זה (min(30, 85-גיל)),
+  // בלי קשר למחוון התקופה שהמשתמש בחר. הסלים הם השוואה תקנית קבועה, לא
+  // התאמה אישית — הכשירות/ה-DTI בהמשך עדיין מבוססים על duration שהמשתמש בחר.
+  const basketTerm = maxTerm;
+  const basketThird = loanAmount / 3;
+  const basketHalf = loanAmount / 2;
 
   // בדיקת תקינות פרטנית לכל תמהיל — האם ההחזר עומד בתקרת 40% DTI
   const maxAllowedPayment = freeIncome * 0.40;
-  const mixATotal = calcPmt(loanAmount, activeRates.FIXED_UNLINKED, duration);
-  const mixCTotal = calcPmt(loanAmount * 0.5, activeRates.PRIME_CALC, duration) + calcPmt(loanAmount * 0.5, activeRates.FIXED_UNLINKED, duration);
+  const mixATotal = calcPmt(loanAmount, activeRates.FIXED_UNLINKED, basketTerm);
+
+  const basket2T1 = { name: "משתנה פריים", amount: basketThird, rate: activeRates.PRIME_CALC, years: basketTerm, pmt: calcPmt(basketThird, activeRates.PRIME_CALC, basketTerm), desc: isSenior && isBalloon ? "ריבית בלבד" : "P-0.5%" };
+  const basket2T2 = { name: "קבועה לא צמודה (קל\"צ)", amount: basketThird, rate: activeRates.FIXED_UNLINKED, years: basketTerm, pmt: calcPmt(basketThird, activeRates.FIXED_UNLINKED, basketTerm), desc: isSenior && isBalloon ? "ריבית בלבד" : "החזר קבוע" };
+  const basket2T3 = { name: "משתנה צמודה מדד (כל 5 שנים)", amount: basketThird, rate: activeRates.VAR_LINKED, years: basketTerm, pmt: calcPmt(basketThird, activeRates.VAR_LINKED, basketTerm), desc: isSenior && isBalloon ? "ריבית בלבד" : "משתנה צמודה" };
+  const mixBTotal = basket2T1.pmt + basket2T2.pmt + basket2T3.pmt;
+
+  const mixCTotal = calcPmt(basketHalf, activeRates.PRIME_CALC, basketTerm) + calcPmt(basketHalf, activeRates.FIXED_UNLINKED, basketTerm);
 
   // האם ניתן לקבל אישור על בסיס תצהיר (התשלום המינימלי עובר את הבדיקה)
   const isDeclarationApprovalPossible = !isReverse && !isSenior && totalInc > 0 && totalInc >= minMixData.requiredIncome;
 
-  // תמהיל CPI — מוצג כשהתמהיל הדינמי (mixB) חורג מ-40% DTI
-  // (DTI העיקרי מבוסס על minMix, לכן בודקים כאן את pmtBdynamic יחסית)
-  const cpiMixData = (!isReverse && !isSenior && pmtBdynamic > maxAllowedPayment)
+  // תמהיל CPI — מוצג כשסל 2 (שלושת השלישים) חורג מ-40% DTI
+  // (DTI העיקרי מבוסס על minMix, לכן בודקים כאן את mixBTotal יחסית)
+  const cpiMixData = (!isReverse && !isSenior && mixBTotal > maxAllowedPayment)
     ? calcCpiMix(loanAmount, duration, activeRates, freeIncome)
     : null;
 
@@ -507,21 +483,23 @@ export const calculateResults = ({ formData, borrowers, maxTerm = 30, rates, ALL
     excessAmount,
     minMix: minMixData,
     isDeclarationApprovalPossible,
-    dynamicMixProfile: { primePct: dynamicMix.primePct, fixedPct: dynamicMix.fixedPct, varPct: dynamicMix.varPct },
+    // סל אחיד 1: 100% קל"צ
     mixA: {
-      tracks: [{ name: isSenior ? "100% קבועה לא צמודה (כל מטרה)" : "100% קבועה לא צמודה", amount: loanAmount, rate: activeRates.FIXED_UNLINKED, years: duration, pmt: mixATotal, desc: isSenior && isBalloon ? "⚠️ בלון - ריבית בלבד" : "הגנה מלאה" }],
+      tracks: [{ name: isSenior ? "100% קבועה לא צמודה (כל מטרה)" : "100% קבועה לא צמודה", amount: loanAmount, rate: activeRates.FIXED_UNLINKED, years: basketTerm, pmt: mixATotal, desc: isSenior && isBalloon ? "⚠️ בלון - ריבית בלבד" : "הגנה מלאה" }],
       total: mixATotal,
       isValid: isReverse || isSenior || mixATotal <= maxAllowedPayment,
     },
+    // סל אחיד 2 ("סל שלושת השלישים"): 33.3% קל"צ + 33.3% משתנה פריים + 33.3% משתנה צמודה (כל 5 שנים)
     mixB: {
-      tracks: dynamicMix.tracks,
-      total: pmtBdynamic,
-      isValid: isReverse || isSenior || pmtBdynamic <= maxAllowedPayment,
+      tracks: [basket2T1, basket2T2, basket2T3],
+      total: mixBTotal,
+      isValid: isReverse || isSenior || mixBTotal <= maxAllowedPayment,
     },
+    // סל אחיד 3 ("סל חצי-חצי"): 50% קל"צ + 50% משתנה פריים, ללא רכיבים צמודי מדד
     mixC: {
       tracks: [
-        { name: "50% פריים (Prime)", amount: loanAmount * 0.5, rate: activeRates.PRIME_CALC, years: duration, pmt: calcPmt(loanAmount * 0.5, activeRates.PRIME_CALC, duration), desc: isSenior && isBalloon ? "ריבית בלבד" : "ניצול שוק" },
-        { name: isSenior ? "50% קבועה (כל מטרה)" : "50% קבועה (קל\"צ)", amount: loanAmount * 0.5, rate: activeRates.FIXED_UNLINKED, years: duration, pmt: calcPmt(loanAmount * 0.5, activeRates.FIXED_UNLINKED, duration), desc: isSenior && isBalloon ? "ריבית בלבד" : "עוגן יציבות" },
+        { name: "50% פריים (Prime)", amount: basketHalf, rate: activeRates.PRIME_CALC, years: basketTerm, pmt: calcPmt(basketHalf, activeRates.PRIME_CALC, basketTerm), desc: isSenior && isBalloon ? "ריבית בלבד" : "ניצול שוק" },
+        { name: isSenior ? "50% קבועה (כל מטרה)" : "50% קבועה (קל\"צ)", amount: basketHalf, rate: activeRates.FIXED_UNLINKED, years: basketTerm, pmt: calcPmt(basketHalf, activeRates.FIXED_UNLINKED, basketTerm), desc: isSenior && isBalloon ? "ריבית בלבד" : "עוגן יציבות" },
       ],
       total: mixCTotal,
       isValid: isReverse || isSenior || mixCTotal <= maxAllowedPayment,
