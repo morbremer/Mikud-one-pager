@@ -68,9 +68,37 @@ CARDCOM_WEBHOOK_URL
 ALLOWED_SITE_ORIGINS
 ```
 
+`analyze-refinance-document` additionally reads (all optional, with working defaults - see the file's own comments for exact behavior):
+
+```text
+AI_PROVIDERS         # comma-separated providers to race per extraction call; defaults to "gemini,openai"
+OPENAI_API_KEY       # required only if "openai" is in AI_PROVIDERS
+OPENAI_MODEL         # defaults to gpt-5.6-luna
+OPENAI_SERVICE_TIER  # defaults to "priority" ("fast mode": higher cost, lower latency)
+```
+
 Secrets become available to functions immediately after saving; a redeployment is not needed just for a secret change.
 
 `RESEND_API_KEY` is currently unset on the live project. This is tolerated only because `src/lib/demoMode.js` has `EMAIL_VERIFICATION_ENABLED = false`, so the frontend never calls `send-email-verification`/`verify-email-code`. Setting `EMAIL_VERIFICATION_ENABLED` back to `true` requires setting `RESEND_API_KEY` first, or email verification will fail in production.
+
+### Observability: `ai_extraction_attempts`
+
+`analyze-refinance-document` races Gemini and OpenAI per extraction call (see the file's own comments on `runProviderLane`/`invokeGeminiWithRetry` for the hedge/retry/cancellation design). Every attempt - both providers, every hedge and retry - is logged as its own row in the `ai_extraction_attempts` table (migration `20260828000000_add_ai_extraction_attempts.sql`), correlated by `request_id`. Query it directly via the SQL editor or `psql`; there's no dashboard view for it. Useful starting queries:
+
+```sql
+-- Win rate by provider (extraction calls only)
+select provider, count(*) filter (where won_race) * 100.0 / count(*) as win_rate_pct
+from ai_extraction_attempts where call_type = 'extraction' group by provider;
+
+-- Average time-to-answer for the winning attempt, by provider
+select provider, avg(duration_ms) from ai_extraction_attempts
+where won_race group by provider;
+
+-- How often hedging actually fires vs plain retries
+select trigger, count(*) from ai_extraction_attempts group by trigger;
+```
+
+`net_savings_ratio` is only ever populated on the winning `extraction` row (net savings ÷ total remaining payments under the old loan), attached after the full savings calculation runs - expect it `null` on every other row.
 
 ## Cloudflare Pages deployment
 

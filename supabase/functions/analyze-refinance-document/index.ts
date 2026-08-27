@@ -26,6 +26,71 @@ const OPENAI_MODEL = Deno.env.get('OPENAI_MODEL') || 'gpt-5.6-luna';
 // "Fast mode" = OpenAI's service_tier: 'priority' (higher cost, lower
 // latency, confirmed live against the real API before wiring this in).
 const OPENAI_SERVICE_TIER = Deno.env.get('OPENAI_SERVICE_TIER') || 'priority';
+
+// ── Attempt logging (ai_extraction_attempts) ────────────────────────────
+// Hoisted to module scope (was request-local, only used by the rate cache)
+// so runProviderLane/invokeGeminiWithRetry can log attempts too. Reuses the
+// same raw-REST pattern as the rate cache below rather than importing
+// _shared/supabase.ts's `service` client - that module throws at import
+// time if SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY are missing, which would
+// turn a missing secret into a hard boot-crash for this whole function.
+// This file's existing rate-cache code deliberately degrades to a no-op
+// instead; purely-additive logging should never be able to take the real
+// analysis down with it, so it follows the same lenient pattern.
+const supabaseRestUrl = Deno.env.get('SUPABASE_URL');
+const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+const cacheHeaders = supabaseRestUrl && supabaseServiceKey ? {
+  apikey: supabaseServiceKey,
+  Authorization: `Bearer ${supabaseServiceKey}`,
+  'Content-Type': 'application/json',
+} : null;
+
+// Lets background logging finish even after the HTTP response has already
+// been sent - without this, a straggler attempt that resolves/errors after
+// the main response returns may get killed with the isolate before its row
+// is written. EdgeRuntime is a Supabase/Deno Deploy global that may not
+// exist in every environment; the promise itself still runs regardless,
+// this only affects whether it's given extra time to finish.
+function keepAlive(promise) {
+  try {
+    if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime?.waitUntil) {
+      EdgeRuntime.waitUntil(promise);
+    }
+  } catch { /* best-effort only */ }
+  return promise;
+}
+
+// Best-effort, fire-and-forget - mirrors writeRateCache's philosophy
+// exactly. A logging failure must never throw or block the real analysis
+// response.
+async function logAttempt(row) {
+  if (!cacheHeaders) return;
+  try {
+    await fetch(`${supabaseRestUrl}/rest/v1/ai_extraction_attempts`, {
+      method: 'POST',
+      headers: cacheHeaders,
+      body: JSON.stringify(row),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch (e) {
+    console.warn(`Attempt logging failed (non-fatal): ${e.message}`);
+  }
+}
+
+async function updateAttempt(id, patch) {
+  if (!cacheHeaders || !id) return;
+  try {
+    await fetch(`${supabaseRestUrl}/rest/v1/ai_extraction_attempts?id=eq.${id}`, {
+      method: 'PATCH',
+      headers: cacheHeaders,
+      body: JSON.stringify(patch),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch (e) {
+    console.warn(`Attempt update failed (non-fatal): ${e.message}`);
+  }
+}
+
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, apikey, content-type, x-client-info',
@@ -190,7 +255,7 @@ function toStrictOpenAISchema(schema) {
 // confirmed live against the real API (PDF text extraction, nullable-typed
 // structured output, and service_tier=priority all verified working)
 // before this was written.
-async function invokeOpenAI({ prompt, files = [], schema = null, label = 'openai' }) {
+async function invokeOpenAI({ prompt, files = [], schema = null, label = 'openai', signal }) {
   if (!OPENAI_API_KEY) {
     throw new Error('OPENAI_API_KEY is not configured');
   }
@@ -224,6 +289,7 @@ async function invokeOpenAI({ prompt, files = [], schema = null, label = 'openai
         method: 'POST',
         headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        signal,
       }),
       GEMINI_CALL_TIMEOUT_MS,
       `OpenAI call exceeded ${Math.round(GEMINI_CALL_TIMEOUT_MS / 1000)}s`,
@@ -259,7 +325,7 @@ async function invokeOpenAI({ prompt, files = [], schema = null, label = 'openai
   }
 }
 
-async function invokeGemini({ model, prompt, files = [], schema = null, label = 'gemini' }) {
+async function invokeGemini({ model, prompt, files = [], schema = null, label = 'gemini', signal }) {
   if (!GEMINI_API_KEY) {
     throw new Error(`GEMINI_API_KEY is not configured (${GEMINI_SECRET_STATUS})`);
   }
@@ -271,6 +337,7 @@ async function invokeGemini({ model, prompt, files = [], schema = null, label = 
   }
 
   const config = { maxOutputTokens: MAX_OUTPUT_TOKENS };
+  if (signal) config.abortSignal = signal;
   if (schema) {
     config.responseMimeType = 'application/json';
     config.responseJsonSchema = schema;
@@ -362,41 +429,81 @@ function invokeProvider(provider, options) {
 const HEDGE_DELAY_MS = 45_000;
 const MAX_ATTEMPTS_PER_LANE = 4;
 
-function runProviderLane(provider, options, laneLabel) {
+// Every attempt gets its own AbortController, pushed onto `controllers`
+// (shared across BOTH provider lanes, owned by invokeGeminiWithRetry) so
+// that once any attempt anywhere wins the whole race, every other one -
+// same lane or the other provider's - can actually be cancelled instead of
+// running to completion for nothing. Each attempt is also logged to
+// ai_extraction_attempts as it settles (fire-and-forget, never blocks).
+function runProviderLane(provider, options, laneLabel, controllers) {
   return new Promise((resolve, reject) => {
     let attemptCount = 0;
     let pendingCount = 0;
     let settled = false;
     let lastError;
+    const model = provider === 'openai' ? OPENAI_MODEL : (options.model || GEMINI_MODEL);
 
-    function launchAttempt() {
+    function launchAttempt(trigger) {
       if (settled || attemptCount >= MAX_ATTEMPTS_PER_LANE) return;
       attemptCount += 1;
       pendingCount += 1;
-      const attemptLabel = `${laneLabel}#${attemptCount}`;
+      const attemptNumber = attemptCount;
+      const attemptLabel = `${laneLabel}#${attemptNumber}`;
+      const controller = new AbortController();
+      controllers.push(controller);
+      const startedAt = Date.now();
+      // Generated client-side so it's known immediately, without waiting on
+      // the insert's own network round-trip - the insert stays fire-and-
+      // forget and never adds latency to the critical path.
+      const attemptId = crypto.randomUUID();
 
       const hedgeTimer = setTimeout(() => {
         if (!settled) {
           console.warn(`[${attemptLabel}] no result after ${HEDGE_DELAY_MS / 1000}s, starting a hedge worker`);
-          launchAttempt();
+          launchAttempt('hedge');
         }
       }, HEDGE_DELAY_MS);
 
-      invokeProvider(provider, { ...options, label: attemptLabel })
-        .then((result) => {
+      invokeProvider(provider, { ...options, label: attemptLabel, signal: controller.signal })
+        .then((value) => {
           clearTimeout(hedgeTimer);
           pendingCount -= 1;
+          keepAlive(logAttempt({
+            id: attemptId,
+            request_id: options.requestId, call_type: options.label || 'gemini', provider, model,
+            attempt_number: attemptNumber, trigger, outcome: 'success',
+            duration_ms: Date.now() - startedAt,
+          }));
           if (!settled) {
             settled = true;
-            resolve(result);
+            resolve({ value, provider, attemptNumber, controller, logRowId: attemptId });
           }
         })
         .catch((error) => {
           clearTimeout(hedgeTimer);
           pendingCount -= 1;
+          if (controller.signal.aborted) {
+            // Cancelled because another lane/attempt already won - this is
+            // deliberate, not a failure. Never retry it, just log it as
+            // abandoned and move on; it doesn't count against the lane.
+            keepAlive(logAttempt({
+              id: attemptId,
+              request_id: options.requestId, call_type: options.label || 'gemini', provider, model,
+              attempt_number: attemptNumber, trigger, outcome: 'aborted',
+              duration_ms: Date.now() - startedAt,
+            }));
+            return;
+          }
           lastError = error;
-          if (settled) return;
           const details = getGeminiErrorDetails(error);
+          keepAlive(logAttempt({
+            id: attemptId,
+            request_id: options.requestId, call_type: options.label || 'gemini', provider, model,
+            attempt_number: attemptNumber, trigger, outcome: 'error',
+            duration_ms: Date.now() - startedAt,
+            error_message: details.message?.slice(0, 500), error_status: details.status || null,
+          }));
+          if (settled) return;
           if (details.isTransient && attemptCount < MAX_ATTEMPTS_PER_LANE) {
             // Jittered backoff before retrying - without this, a genuine
             // rate-limit failure gets hammered again instantly and just
@@ -406,7 +513,7 @@ function runProviderLane(provider, options, laneLabel) {
             // any room to clear).
             const retryDelayMs = 500 + Math.floor(Math.random() * 1000);
             console.warn(`[${attemptLabel}] failed (${details.status || 'transient'}), retrying in ${retryDelayMs}ms: ${details.message}`);
-            setTimeout(() => { if (!settled) launchAttempt(); }, retryDelayMs);
+            setTimeout(() => { if (!settled) launchAttempt('retry'); }, retryDelayMs);
           } else if (pendingCount === 0) {
             // Nothing else from this lane is still in flight and nothing
             // succeeded - only now does the lane give up.
@@ -416,23 +523,52 @@ function runProviderLane(provider, options, laneLabel) {
         });
     }
 
-    launchAttempt();
+    launchAttempt('initial');
   });
 }
 
 async function invokeGeminiWithRetry(options) {
   const label = options.label || 'gemini';
-  const lanes = ACTIVE_PROVIDERS.map((provider) => runProviderLane(provider, options, `${label}:${provider}`));
+  const controllers = [];
+  const lanes = ACTIVE_PROVIDERS.map((provider) => runProviderLane(provider, options, `${label}:${provider}`, controllers));
+  let winner;
   try {
-    return await Promise.any(lanes);
+    winner = await Promise.any(lanes);
   } catch (aggregateError) {
     // Promise.any only rejects once every provider lane has given up.
     // Surface the first underlying error rather than the AggregateError
     // wrapper, so callers see the same error shape as before.
-    const underlying = aggregateError?.errors?.[0] || aggregateError;
+    const underlying = aggregateError?.errors?.[0]?.value ?? aggregateError?.errors?.[0] ?? aggregateError;
     console.warn(`[${label}] all providers (${ACTIVE_PROVIDERS.join(', ')}) failed`);
     throw underlying;
   }
+
+  // Stop every other still-running attempt now that we have an answer -
+  // saves tokens/cost on both providers rather than letting losers run to
+  // completion for nothing. The winner's own controller is skipped (it's
+  // already settled; aborting it would be a no-op anyway).
+  for (const controller of controllers) {
+    if (controller !== winner.controller) controller.abort();
+  }
+
+  if (winner.logRowId) {
+    keepAlive(updateAttempt(winner.logRowId, { won_race: true }));
+  }
+
+  // Surface the winning row's id for the 'extraction' call specifically, so
+  // the handler can attach the net-savings ratio to it later, once savings
+  // are actually computed (well after this race concludes). Non-enumerable
+  // and stripped by the caller right after reading it, so it never leaks
+  // into any JSON built from this object downstream. Only attempted when
+  // the result is a genuine object (every current call site passes a
+  // schema, so this always holds in practice).
+  if (label === 'extraction' && winner.value && typeof winner.value === 'object') {
+    Object.defineProperty(winner.value, '_extractionLogRowId', {
+      value: winner.logRowId, enumerable: false, configurable: true,
+    });
+  }
+
+  return winner.value;
 }
 
 Deno.serve(async (req) => {
@@ -444,6 +580,12 @@ Deno.serve(async (req) => {
   }
 
   const requestStartedAt = Date.now();
+  // Correlates every attempt (both provider lanes, all 4 call types, any
+  // hedges/retries) belonging to this one browser request in
+  // ai_extraction_attempts. Closure-scoped (not module-scope) deliberately -
+  // this function handles real concurrent traffic, and module-level mutable
+  // state would leak between simultaneous requests.
+  const requestId = crypto.randomUUID();
   try {
     // This public quick-check flow intentionally has no application-auth gate.
 
@@ -594,14 +736,6 @@ Return structured data as specified in the JSON schema.`;
     const BOI_FIXED_UNLINKED_SERIES = 'BNK_99034_LR_BIR_MRTG_467';  // ריבית קבועה לא צמודה, חדש, סך מערכת בנקאית
     const BOI_FIXED_LINKED_SERIES = 'BNK_99034_LR_BIR_MRTG_1492';   // ריבית קבועה צמודה מדד, חדש, סך מערכת בנקאית
     const RATE_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-
-    const supabaseRestUrl = Deno.env.get('SUPABASE_URL');
-    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-    const cacheHeaders = supabaseRestUrl && supabaseServiceKey ? {
-      apikey: supabaseServiceKey,
-      Authorization: `Bearer ${supabaseServiceKey}`,
-      'Content-Type': 'application/json',
-    } : null;
 
     async function readRateCache() {
       if (!cacheHeaders) return null;
@@ -759,6 +893,7 @@ Only extract what you can clearly read. Return null if unclear.`;
           files: [documentFile],
           schema: EXTRACTION_SCHEMA,
           label: 'extraction',
+          requestId,
         }),
         invokeGeminiWithRetry({
           model: GEMINI_MODEL,
@@ -766,6 +901,7 @@ Only extract what you can clearly read. Return null if unclear.`;
           files: [documentFile],
           schema: IDENTITY_SCHEMA,
           label: 'identity',
+          requestId,
         }),
       ]);
 
@@ -786,6 +922,16 @@ Only extract what you can clearly read. Return null if unclear.`;
     };
 
     const { extractionResult, identityResult } = await runExtractionWithRetry();
+    // Stashed (non-enumerable) by invokeGeminiWithRetry on the 'extraction'
+    // call's winning attempt - captured here, before anything downstream
+    // touches extractionResult, so the net-savings ratio can be attached to
+    // the right row much later once savings are actually computed. If the
+    // gotNothing fallback below ends up replacing the data with a
+    // fallback-retry result, this still points at the original extraction
+    // winner - a minor imprecision in that rare case, not worth tracking a
+    // second id for.
+    const extractionWinnerLogRowId = extractionResult._extractionLogRowId;
+    delete extractionResult._extractionLogRowId;
     resolveAllBalances(extractionResult);
 
     // Await the rates (already running in background since before file extraction)
@@ -811,6 +957,7 @@ Only extract what you can clearly read. Return null if unclear.`;
           files: [documentFile],
           schema: EXTRACTION_SCHEMA,
           label: 'fallback-retry',
+          requestId,
         });
         resolveAllBalances(retryResult);
         if (retryResult.remaining_balance > 0 || (retryResult.tracks && retryResult.tracks.length > 0)) {
@@ -995,6 +1142,7 @@ Only extract what you can clearly read. Return null if unclear.`;
         const retry = await invokeGeminiWithRetry({
           model: GEMINI_MODEL,
           label: 'track-retry',
+          requestId,
           prompt: `This is an Israeli mortgage payoff statement. I need to find all individual loan tracks (מסלולים/הלוואות).
 The document shows balance ₪${actualRemainingBalance.toLocaleString()} total.
 Find EACH individual track and extract:
@@ -1268,6 +1416,16 @@ Today: ${today}`,
       savingsResult = calculateFinalSavings(totalOldPayments, totalNewPayments, earlyRepaymentFee, null, newMonthlyPaymentTotal);
     }
     const { grossSavings, monthlySavings } = savingsResult;
+
+    // Business-outcome metric attached to whichever provider/attempt won
+    // the extraction race, so later analysis can correlate provider choice
+    // with the actual result quality/magnitude a borrower saw, not just
+    // latency and success rate.
+    if (extractionWinnerLogRowId && totalOldPayments > 0) {
+      keepAlive(updateAttempt(extractionWinnerLogRowId, {
+        net_savings_ratio: savingsResult.netSavings / totalOldPayments,
+      }));
+    }
 
     // חיסכון חודשי כולל (להצגה בסיכום): הפרש ההחזר החודשי הכולל לפני ואחרי
     const overallMonthlySavings = Math.round(existingMonthlyPayment - newMonthlyPaymentTotal);
