@@ -1818,11 +1818,19 @@ Today: ${today}`,
     console.error('Error:', error);
     const geminiError = getGeminiErrorDetails(error);
     if (geminiError.isTransient) {
+      // Status 200, not 429/503: supabase-js's functions.invoke() only parses
+      // the response body on a 2xx status. A non-2xx here discards this whole
+      // JSON payload and surfaces a generic "Edge Function returned a non-2xx
+      // status code" to the browser instead - losing the Hebrew message and
+      // errorCode the frontend actually reads. Every other failure path in
+      // this function already returns 200 for exactly this reason; this one
+      // used to be rare enough not to notice, but race-of-5 correlated
+      // failures made it common.
       return jsonResponse({
         success: false,
         error: 'שירות הניתוח עמוס כרגע. נסה שוב בעוד מספר רגעים.',
         errorCode: 'MODEL_BUSY',
-      }, { status: geminiError.status || 503 });
+      }, { status: 200 });
     }
 
     // A contract error means OUR request was wrong, not the borrower's upload.
