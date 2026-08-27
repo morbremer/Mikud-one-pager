@@ -9,7 +9,7 @@ const GEMINI_MODEL = 'gemini-3.5-flash';
 const MAX_OUTPUT_TOKENS = 16384;
 // No per-call deadline existed at all, so one stuck Gemini call held the whole
 // analysis open until the caller gave up.
-const GEMINI_CALL_TIMEOUT_MS = 90_000;
+const GEMINI_CALL_TIMEOUT_MS = 120_000;
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, apikey, content-type, x-client-info',
@@ -200,33 +200,54 @@ function getGeminiErrorDetails(error) {
   return { message, status, isTransient, isContractError: false };
 }
 
-async function invokeGeminiWithRetry(options) {
-  const label = options.label || 'gemini';
+// Hedged/raced requests: fires GEMINI_RACE_COUNT identical calls to the
+// model in parallel and returns whichever one finishes first via
+// Promise.any. Each racer independently retries its own 503/transient
+// failures (up to GEMINI_RACER_MAX_ATTEMPTS) without blocking the others —
+// one racer hitting a capacity error just falls out of the race, it doesn't
+// stall the request. This deliberately trades Gemini call volume (up to
+// GEMINI_RACE_COUNT × GEMINI_RACER_MAX_ATTEMPTS calls for what used to be a
+// single call) for lower tail latency: a slow/overloaded individual call is
+// far more common in practice than genuine account-level rate limiting, so
+// racing past it wins more often than it costs.
+const GEMINI_RACE_COUNT = 5;
+const GEMINI_RACER_MAX_ATTEMPTS = 2;
+
+async function invokeGeminiRacer(options, racerLabel) {
   let lastError;
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
+  for (let attempt = 1; attempt <= GEMINI_RACER_MAX_ATTEMPTS; attempt += 1) {
     try {
-      return await invokeGemini(options);
+      return await invokeGemini({ ...options, label: racerLabel });
     } catch (error) {
       lastError = error;
-      if (attempt === 2) break;
       const details = getGeminiErrorDetails(error);
-      // Only genuinely transient failures are worth a second attempt. Retrying
-      // deterministic ones (bad config, contract violations) just doubled the
-      // load: one submit already fans out to several concurrent calls, each
-      // carrying the full document, so blind retry can tip a rate limit on its
-      // own and still cannot succeed.
-      if (!details.isTransient) {
-        console.warn(`[${label}] Gemini attempt ${attempt} failed permanently: ${details.message}`);
-        break;
-      }
-      const retryDelayMs = 3000 + Math.floor(Math.random() * 1500);
+      if (!details.isTransient || attempt === GEMINI_RACER_MAX_ATTEMPTS) throw error;
       console.warn(
-        `[${label}] Gemini attempt ${attempt} failed; retrying once in ${retryDelayMs}ms: ${details.message}`,
+        `[${racerLabel}] attempt ${attempt} failed (${details.status || 'transient'}), retrying: ${details.message}`,
       );
-      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      // Short jitter only — the other racers are already in flight, so this
+      // one doesn't need a long backoff to still have a chance of winning.
+      await new Promise((resolve) => setTimeout(resolve, 200 + Math.floor(Math.random() * 400)));
     }
   }
   throw lastError;
+}
+
+async function invokeGeminiWithRetry(options) {
+  const label = options.label || 'gemini';
+  const racers = Array.from({ length: GEMINI_RACE_COUNT }, (_, i) =>
+    invokeGeminiRacer(options, `${label}#${i + 1}`),
+  );
+  try {
+    return await Promise.any(racers);
+  } catch (aggregateError) {
+    // Promise.any only rejects once every racer has exhausted its own
+    // attempts. Surface the first underlying Gemini error rather than the
+    // AggregateError wrapper, so callers see the same error shape as before.
+    const underlying = aggregateError?.errors?.[0] || aggregateError;
+    console.warn(`[${label}] all ${GEMINI_RACE_COUNT} racers failed`);
+    throw underlying;
+  }
 }
 
 Deno.serve(async (req) => {
@@ -532,8 +553,9 @@ Return structured data as specified in the JSON schema.`;
 Also extract the statement date (תאריך הדוח / תאריך היתרה / ליום) in DD/MM/YYYY format.
 Only extract what you can clearly read. Return null if unclear.`;
 
-    // PDFs and images use the same Gemini multimodal path. Each call retries
-    // Gemini once on failure; no secondary provider is configured.
+    // PDFs and images use the same Gemini multimodal path. Each call races
+    // GEMINI_RACE_COUNT parallel attempts and takes whichever finishes first;
+    // no secondary provider is configured.
     const runExtractionWithRetry = async () => {
       const [extr, ident] = await Promise.all([
         invokeGeminiWithRetry({

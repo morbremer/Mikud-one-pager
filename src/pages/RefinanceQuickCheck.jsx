@@ -386,10 +386,14 @@ export default function RefinanceQuickCheck() {
   useEffect(() => {
     if (!isAnalyzing) { setProgress(0); return; }
     setProgress(10);
-    const t1 = setTimeout(() => setProgress(40), 3000);
-    const t2 = setTimeout(() => setProgress(70), 10000);
-    const t3 = setTimeout(() => setProgress(88), 20000);
-    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); };
+    // Paced for the real 60-120s range the analyzer can take (per-call
+    // Gemini timeout is 120s) rather than the old ~20-40s assumption -
+    // otherwise the bar would sit stalled at 88% for up to another 100s.
+    const t1 = setTimeout(() => setProgress(30), 8000);
+    const t2 = setTimeout(() => setProgress(55), 25000);
+    const t3 = setTimeout(() => setProgress(75), 55000);
+    const t4 = setTimeout(() => setProgress(90), 95000);
+    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); clearTimeout(t4); };
   }, [isAnalyzing]);
 
 
@@ -1016,7 +1020,7 @@ export default function RefinanceQuickCheck() {
                   <div className="w-full bg-mist-200 rounded-full h-2">
                     <div className="bg-[#0153F4] h-2 rounded-full transition-all duration-1000" style={{ width: `${progress}%` }} />
                   </div>
-                  <p className="text-xs text-mist-500 text-center">ניתוח מעמיק — עשוי לקחת 20-40 שניות</p>
+                  <p className="text-xs text-mist-500 text-center">ניתוח מעמיק — עשוי לקחת 60-120 שניות</p>
                 </div>
               )}
 
