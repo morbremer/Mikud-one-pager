@@ -220,6 +220,14 @@ function borrowerNameMatchesContact(borrowersNames, contactName) {
   });
 }
 
+// לתצוגה בהודעת אי-ההתאמה — כדי שהמשתמש יראה בדיוק מה חולץ מהמסמך ולא רק
+// שההשוואה נכשלה.
+function formatExtractedBorrowerNames(borrowersNames) {
+  const names = (borrowersNames || []).map((name) => String(name || '').trim()).filter(Boolean);
+  if (names.length === 0) return null;
+  return names.join(' ו-');
+}
+
 function EffectiveRateInfo() {
   return (
     <Popover>
@@ -579,7 +587,9 @@ export default function RefinanceQuickCheck() {
   // (שכבר קיימת ותקינה) בצד, כדי שכפתור "אני בטוח שזה המסמך הנכון" יוכל
   // להמשיך איתה ישירות בלי לבקש העלאה חוזרת של הקובץ.
   const handleNameMismatch = (data, file_url, externalDebtsInput) => {
-    setError(`❌ השם שחולץ מהמסמך שהעלית אינו תואם לשם שהוזן בתחילת התהליך (${contactFullName}). ודא שהעלית את המסמך של האדם הנכון.`);
+    const extractedName = formatExtractedBorrowerNames(data?.currentLoan?.borrowers_names);
+    const extractedNamePart = extractedName ? ` השם שזוהה במסמך: ${extractedName}.` : '';
+    setError(`❌ השם שחולץ מהמסמך שהעלית אינו תואם לשם שהוזן בתחילת התהליך (${contactFullName}).${extractedNamePart} ודא שהעלית את המסמך של האדם הנכון.`);
     setNameMismatchPending({ data, file_url, externalDebtsInput });
     updateLead({
       status: 'error',
