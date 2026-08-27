@@ -398,8 +398,15 @@ function runProviderLane(provider, options, laneLabel) {
           if (settled) return;
           const details = getGeminiErrorDetails(error);
           if (details.isTransient && attemptCount < MAX_ATTEMPTS_PER_LANE) {
-            console.warn(`[${attemptLabel}] failed (${details.status || 'transient'}), retrying: ${details.message}`);
-            launchAttempt();
+            // Jittered backoff before retrying - without this, a genuine
+            // rate-limit failure gets hammered again instantly and just
+            // fails again instantly too (confirmed live: a 10x concurrent
+            // test came back in 6-10s with 9/10 MODEL_BUSY, exhausting the
+            // retry budget in one fast burst instead of giving the limit
+            // any room to clear).
+            const retryDelayMs = 500 + Math.floor(Math.random() * 1000);
+            console.warn(`[${attemptLabel}] failed (${details.status || 'transient'}), retrying in ${retryDelayMs}ms: ${details.message}`);
+            setTimeout(() => { if (!settled) launchAttempt(); }, retryDelayMs);
           } else if (pendingCount === 0) {
             // Nothing else from this lane is still in flight and nothing
             // succeeded - only now does the lane give up.
