@@ -2,7 +2,7 @@ import { GoogleGenAI } from "npm:@google/genai@^2.0.0";
 
 // Portable refinance analysis core. The hosting platform only supplies a
 // standard Deno HTTP runtime and the GEMINI_API_KEY environment variable.
-const GEMINI_MODEL = 'gemini-3.5-flash';
+const GEMINI_MODEL = 'gemini-3.7-flash';
 // Caps generation so a run-away response can't stall the request. Extraction of
 // a 12-track statement fits comfortably; before this cap a single call was
 // observed still streaming after 5 minutes.
@@ -126,7 +126,10 @@ async function invokeGemini({ model, prompt, files = [], schema = null }) {
     parts.push({ inlineData: { mimeType, data } });
   }
 
-  const config = { maxOutputTokens: MAX_OUTPUT_TOKENS };
+  // Extraction is deterministic pattern-matching (read labeled numbers off a
+  // statement), not open-ended reasoning — 'low' keeps Gemini 3's default
+  // thinking pass from adding latency it doesn't need here.
+  const config = { maxOutputTokens: MAX_OUTPUT_TOKENS, thinkingConfig: { thinkingLevel: 'low' } };
   if (schema) {
     config.responseMimeType = 'application/json';
     config.responseJsonSchema = schema;
