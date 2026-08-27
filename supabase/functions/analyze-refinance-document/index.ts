@@ -10,6 +10,19 @@ const MAX_OUTPUT_TOKENS = 16384;
 // No per-call deadline existed at all, so one stuck Gemini call held the whole
 // analysis open until the caller gave up.
 const GEMINI_CALL_TIMEOUT_MS = 120_000;
+
+// ── EXPERIMENTAL: OpenAI provider swap ──────────────────────────────────
+// Toggled entirely via Supabase secrets, not a redeploy, so it can be
+// switched on/off instantly: set AI_PROVIDER=openai to route every
+// invokeGemini() call (all 4 call sites, transparently) through OpenAI's
+// gpt-5.6-luna instead of Gemini. Default stays 'gemini' — unset/unknown
+// values fall back to the existing, known-good path.
+const AI_PROVIDER = (Deno.env.get('AI_PROVIDER') || 'gemini').trim().toLowerCase();
+const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY') || '';
+const OPENAI_MODEL = Deno.env.get('OPENAI_MODEL') || 'gpt-5.6-luna';
+// "Fast mode" = OpenAI's service_tier: 'priority' (higher cost, lower
+// latency, confirmed live against the real API before wiring this in).
+const OPENAI_SERVICE_TIER = Deno.env.get('OPENAI_SERVICE_TIER') || 'priority';
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, apikey, content-type, x-client-info',
@@ -115,7 +128,110 @@ class GeminiContractError extends Error {
 // JSON.parse. `responseJsonSchema` — not `responseSchema` — is the correct field
 // here: these schemas use standard JSON Schema nullable type arrays
 // (`type: ["string", "null"]`), which the OpenAPI-subset `responseSchema` rejects.
+// OpenAI's strict structured-output mode requires every object in the
+// schema to declare additionalProperties:false and list every one of its
+// own property keys in `required` (this is about the field always being
+// *present* in the output, not non-null - our schemas' existing
+// `type: [..., "null"]` unions already say "may be null" and pass through
+// unchanged). Applied recursively so nested arrays-of-objects (e.g. tracks)
+// get the same treatment. Verified live against the real API before this
+// was wired in - Gemini's responseJsonSchema has no such requirement, which
+// is why this conversion only happens on the OpenAI path.
+function toStrictOpenAISchema(schema) {
+  if (schema && schema.type === 'object' && schema.properties) {
+    const properties = {};
+    for (const [key, value] of Object.entries(schema.properties)) {
+      properties[key] = toStrictOpenAISchema(value);
+    }
+    return { ...schema, properties, additionalProperties: false, required: Object.keys(schema.properties) };
+  }
+  if (schema && schema.type === 'array' && schema.items) {
+    return { ...schema, items: toStrictOpenAISchema(schema.items) };
+  }
+  return schema;
+}
+
+// EXPERIMENTAL provider. Mirrors invokeGemini's interface (prompt, files,
+// schema, label in; parsed JSON or text out) so invokeGeminiWithRetry's
+// race-of-5 wrapper and every call site work unchanged regardless of which
+// provider is active. Uses the Responses API: input_file (base64 file_data)
+// for PDFs, input_image (base64 image_url) for images - confirmed live
+// against the real API (PDF text extraction, nullable-typed structured
+// output, and service_tier=priority all verified working) before this was
+// written.
+async function invokeOpenAI({ prompt, files = [], schema = null, label = 'openai' }) {
+  if (!OPENAI_API_KEY) {
+    throw new Error('OPENAI_API_KEY is not configured');
+  }
+
+  const content = [{ type: 'input_text', text: prompt }];
+  for (const { mimeType, data } of files) {
+    if ((mimeType || '').startsWith('image/')) {
+      content.push({ type: 'input_image', image_url: `data:${mimeType};base64,${data}` });
+    } else {
+      content.push({ type: 'input_file', filename: 'document.pdf', file_data: `data:${mimeType};base64,${data}` });
+    }
+  }
+
+  const body = {
+    model: OPENAI_MODEL,
+    service_tier: OPENAI_SERVICE_TIER,
+    max_output_tokens: MAX_OUTPUT_TOKENS,
+    input: [{ role: 'user', content }],
+  };
+  if (schema) {
+    body.text = {
+      format: { type: 'json_schema', name: 'extraction', strict: true, schema: toStrictOpenAISchema(schema) },
+    };
+  }
+
+  const callStartedAt = Date.now();
+  let res;
+  try {
+    res = await withTimeout(
+      fetch('https://api.openai.com/v1/responses', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
+      GEMINI_CALL_TIMEOUT_MS,
+      `OpenAI call exceeded ${Math.round(GEMINI_CALL_TIMEOUT_MS / 1000)}s`,
+    );
+  } catch (error) {
+    console.warn(`⏱️ [${label}] OpenAI call FAILED after ${((Date.now() - callStartedAt) / 1000).toFixed(1)}s: ${error?.message || error}`);
+    throw error;
+  }
+
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '');
+    const err = new Error(`OpenAI HTTP ${res.status}: ${errBody.slice(0, 300)}`);
+    err.status = res.status;
+    console.warn(`⏱️ [${label}] OpenAI call FAILED after ${((Date.now() - callStartedAt) / 1000).toFixed(1)}s: ${err.message}`);
+    throw err;
+  }
+
+  const json = await res.json();
+  console.log(`⏱️ [${label}] OpenAI call took ${((Date.now() - callStartedAt) / 1000).toFixed(1)}s (model=${OPENAI_MODEL}, tier=${OPENAI_SERVICE_TIER})`);
+  const text = (json.output || [])
+    .flatMap((item) => item.content || [])
+    .map((c) => c.text)
+    .filter(Boolean)
+    .join('');
+  if (!schema) return text;
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new GeminiContractError(
+      `OpenAI did not return JSON (got ${text.length} chars): ${text.slice(0, 200)}`,
+    );
+  }
+}
+
 async function invokeGemini({ model, prompt, files = [], schema = null, label = 'gemini' }) {
+  if (AI_PROVIDER === 'openai') {
+    return await invokeOpenAI({ prompt, files, schema, label });
+  }
   if (!GEMINI_API_KEY) {
     throw new Error(`GEMINI_API_KEY is not configured (${GEMINI_SECRET_STATUS})`);
   }
