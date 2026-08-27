@@ -120,6 +120,35 @@ class GeminiContractError extends Error {
   }
 }
 
+// Bank statements sometimes print two different "remaining balance" figures
+// per track: יתרת קרן (principal_balance, raw ledger principal) and יתרה
+// לסילוק (settlement_balance, what you'd actually pay today to close the
+// loan - the number a refinance decision should be based on). The
+// extraction schema asks the model for both separately rather than treating
+// them as synonyms. This resolves them into the single `remaining_balance`
+// field every downstream calculation already reads - settlement_balance
+// wins when both are present, principal_balance is the fallback when only
+// one was printed, matching whatever the document actually showed. Mutates
+// in place so every existing `.remaining_balance` read (top-level and
+// per-track, ~40 call sites) keeps working unchanged.
+function resolveBalanceFields(obj) {
+  if (!obj || typeof obj !== 'object') return;
+  const settlement = obj.settlement_balance;
+  const principal = obj.principal_balance;
+  if (typeof settlement === 'number' && settlement > 0) {
+    obj.remaining_balance = settlement;
+  } else if (typeof principal === 'number' && principal > 0) {
+    obj.remaining_balance = principal;
+  } else {
+    obj.remaining_balance = obj.remaining_balance || 0;
+  }
+}
+
+function resolveAllBalances(extractionResult) {
+  resolveBalanceFields(extractionResult);
+  (extractionResult.tracks || []).forEach(resolveBalanceFields);
+}
+
 // Structured output must be requested via `responseMimeType` + `responseJsonSchema`
 // on GenerateContentConfig. An earlier revision set a `responseFormat` object
 // (the shape belonging to the separate `interactions.create` API); that key
@@ -431,11 +460,19 @@ TODAY: ${today}
 3. FOR EACH LOAN TRACK (מסלול / הלוואה / רכיב):
    The document may have 1-10 tracks in various layouts. Find ALL of them.
 
-   a) REMAINING BALANCE (יתרת קרן / יתרה לסילוק / יתרת הלוואה):
-      - This is the CURRENT outstanding principal, NOT the original loan amount
+   a) REMAINING BALANCE — TWO POSSIBLE FIGURES. Extract BOTH separately when the document shows both:
+      - settlement_balance = יתרה לסילוק: the amount to pay TODAY to fully close/settle this track.
+        This is what a payoff statement ("יתרת סילוק") exists to answer, and is the figure a refinance
+        decision must be based on.
+      - principal_balance = יתרת קרן: the raw ledger principal balance — an accounting figure that can
+        differ from the settlement figure by unsettled linkage/interest accrual (עודף/פיגור הצמדה).
+      - These are OFTEN the same number, but some banks (e.g. Bank Hapoalim) print them as two DISTINCT
+        columns with genuinely different values. Do not assume they are interchangeable — read each
+        column by its own printed label. Fill in whichever field(s) the document actually shows as
+        separate columns; leave a field null if that specific figure isn't printed separately.
+      - Both are the CURRENT outstanding balance, NOT the original loan amount
       - Usually between ₪20,000 and ₪2,000,000 per track
-      - Hebrew labels: יתרת קרן, יתרה לסילוק, יתרת ההלוואה, קרן שנותרה
-      - DO NOT use: סכום ההלוואה המקורי / סכום מקורי (original amount — ignore this)
+      - DO NOT use for either field: סכום ההלוואה המקורי / סכום מקורי (original loan amount — ignore this)
 
    b) INTEREST RATE (שיעור ריבית / ריבית):
       - The CURRENT nominal interest rate in percent (e.g., 4.5, 2.8, 5.1)
@@ -488,7 +525,7 @@ TODAY: ${today}
 
 ═══ CRITICAL RULES ═══
 - Extract ALL tracks — multi-page documents may have 4-12 tracks spread across pages
-- Sum track balances for total. If you see a "סה"כ" summary row, verify it matches your sum
+- Sum each track's settlement_balance for the top-level settlement_balance total, and each track's principal_balance for the top-level principal_balance total — don't mix the two columns. If you see a "סה"כ" summary row for either column, verify it matches your sum
 - Never invent numbers — if unclear, return null for that field
 - For multi-column layouts: each column = one track
 - For multi-row layouts: each row group = one track
@@ -621,7 +658,8 @@ Return structured data as specified in the JSON schema.`;
         bank_name: { type: ["string", "null"] },
         statement_date: { type: ["string", "null"] },
         is_full_payoff_statement: { type: "boolean" },
-        remaining_balance: { type: "number", description: "Sum of all track balances" },
+        settlement_balance: { type: ["number", "null"], description: "Sum of all tracks' יתרה לסילוק (settlement/payoff balance) - the amount actually owed to close the loan today. This is the preferred figure when the document shows it." },
+        principal_balance: { type: ["number", "null"], description: "Sum of all tracks' יתרת קרן (raw ledger principal balance). Only used as a fallback when settlement_balance isn't available." },
         monthly_payment: { type: "number", description: "Total monthly payment" },
         remaining_months: { type: ["number", "null"] },
         average_interest_rate: { type: ["number", "null"] },
@@ -634,7 +672,8 @@ Return structured data as specified in the JSON schema.`;
             type: "object",
             properties: {
               track_type: { type: "string" },
-              remaining_balance: { type: "number" },
+              settlement_balance: { type: ["number", "null"], description: "יתרה לסילוק for this track - preferred." },
+              principal_balance: { type: ["number", "null"], description: "יתרת קרן for this track - fallback if settlement_balance isn't printed separately." },
               interest_rate: { type: "number" },
               remaining_months: { type: "number" },
               is_index_linked: { type: "boolean" },
@@ -700,7 +739,7 @@ Only extract what you can clearly read. Return null if unclear.`;
       if (!extr || typeof extr !== 'object' || Array.isArray(extr)) {
         throw new GeminiContractError('Extraction did not return a JSON object');
       }
-      if (!Array.isArray(extr.tracks) && typeof extr.remaining_balance !== 'number') {
+      if (!Array.isArray(extr.tracks) && typeof extr.settlement_balance !== 'number' && typeof extr.principal_balance !== 'number') {
         throw new GeminiContractError(
           `Extraction matched no part of the schema (keys: ${Object.keys(extr).join(', ') || 'none'})`,
         );
@@ -710,6 +749,7 @@ Only extract what you can clearly read. Return null if unclear.`;
     };
 
     const { extractionResult, identityResult } = await runExtractionWithRetry();
+    resolveAllBalances(extractionResult);
 
     // Await the rates (already running in background since before file extraction)
     let ratesResultRaw = null;
@@ -735,6 +775,7 @@ Only extract what you can clearly read. Return null if unclear.`;
           schema: EXTRACTION_SCHEMA,
           label: 'fallback-retry',
         });
+        resolveAllBalances(retryResult);
         if (retryResult.remaining_balance > 0 || (retryResult.tracks && retryResult.tracks.length > 0)) {
           Object.assign(extractionResult, retryResult);
           console.log(`✅ Gemini fallback succeeded: ${retryResult.tracks?.length || 0} tracks | Balance: ₪${retryResult.remaining_balance?.toLocaleString()}`);
@@ -921,7 +962,8 @@ Only extract what you can clearly read. Return null if unclear.`;
 The document shows balance ₪${actualRemainingBalance.toLocaleString()} total.
 Find EACH individual track and extract:
 - track_type: פריים / קבועה לא צמודה / קבועה צמודה / משתנה לא צמודה / משתנה צמודה
-- remaining_balance: יתרת קרן per track (NOT original amount)
+- settlement_balance: יתרה לסילוק per track (amount to pay today to close it) - preferred
+- principal_balance: יתרת קרן per track - fallback if settlement isn't shown separately (NOT original amount)
 - interest_rate: current rate in percent
 - remaining_months: months until end date from today (${today})
 - is_index_linked: true only for CPI/מדד-linked tracks
@@ -937,7 +979,8 @@ Today: ${today}`,
                   type: "object",
                   properties: {
                     track_type: { type: "string" },
-                    remaining_balance: { type: "number" },
+                    settlement_balance: { type: ["number", "null"] },
+                    principal_balance: { type: ["number", "null"] },
                     interest_rate: { type: "number" },
                     remaining_months: { type: "number" },
                     is_index_linked: { type: "boolean" },
@@ -951,6 +994,7 @@ Today: ${today}`,
           }
         });
 
+        (retry.tracks || []).forEach(resolveBalanceFields);
         const validTracks = (retry.tracks || []).filter(t => (t.remaining_balance || 0) > 0 && (t.remaining_months || 0) > 0);
         if (validTracks.length > 0) {
           const tracksSum = validTracks.reduce((s, t) => s + t.remaining_balance, 0);
