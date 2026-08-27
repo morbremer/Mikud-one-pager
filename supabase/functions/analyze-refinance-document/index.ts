@@ -326,7 +326,10 @@ function getGeminiErrorDetails(error) {
 // single call) for lower tail latency: a slow/overloaded individual call is
 // far more common in practice than genuine account-level rate limiting, so
 // racing past it wins more often than it costs.
-const GEMINI_RACE_COUNT = 5;
+// Configurable via secret (RACE_COUNT) so concurrency can be dialed down for
+// testing (5 -> 3 -> 1) without a redeploy per step. Clamped to >= 1 so a
+// bad/empty value cannot silently disable racing to 0 parallel calls.
+const GEMINI_RACE_COUNT = Math.max(1, Number(Deno.env.get("RACE_COUNT")) || 5);
 const GEMINI_RACER_MAX_ATTEMPTS = 2;
 
 async function invokeGeminiRacer(options, racerLabel) {
