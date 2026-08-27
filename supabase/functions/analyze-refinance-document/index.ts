@@ -11,13 +11,16 @@ const MAX_OUTPUT_TOKENS = 16384;
 // analysis open until the caller gave up.
 const GEMINI_CALL_TIMEOUT_MS = 120_000;
 
-// ── EXPERIMENTAL: OpenAI provider swap ──────────────────────────────────
-// Toggled entirely via Supabase secrets, not a redeploy, so it can be
-// switched on/off instantly: set AI_PROVIDER=openai to route every
-// invokeGemini() call (all 4 call sites, transparently) through OpenAI's
-// gpt-5.6-luna instead of Gemini. Default stays 'gemini' — unset/unknown
-// values fall back to the existing, known-good path.
-const AI_PROVIDER = (Deno.env.get('AI_PROVIDER') || 'gemini').trim().toLowerCase();
+// ── Multi-provider racing ────────────────────────────────────────────────
+// Every extraction call races ALL of ACTIVE_PROVIDERS in parallel (one
+// worker per provider, not N identical workers on one provider) and uses
+// whichever answers first. Configurable via the AI_PROVIDERS secret
+// (comma-separated, e.g. "gemini" to disable the OpenAI lane for testing);
+// defaults to both. No redeploy needed to change this.
+const ACTIVE_PROVIDERS = (Deno.env.get('AI_PROVIDERS') || Deno.env.get('AI_PROVIDER') || 'gemini,openai')
+  .split(',')
+  .map((p) => p.trim().toLowerCase())
+  .filter(Boolean);
 const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY') || '';
 const OPENAI_MODEL = Deno.env.get('OPENAI_MODEL') || 'gpt-5.6-luna';
 // "Fast mode" = OpenAI's service_tier: 'priority' (higher cost, lower
@@ -180,14 +183,13 @@ function toStrictOpenAISchema(schema) {
   return schema;
 }
 
-// EXPERIMENTAL provider. Mirrors invokeGemini's interface (prompt, files,
-// schema, label in; parsed JSON or text out) so invokeGeminiWithRetry's
-// race-of-5 wrapper and every call site work unchanged regardless of which
-// provider is active. Uses the Responses API: input_file (base64 file_data)
-// for PDFs, input_image (base64 image_url) for images - confirmed live
-// against the real API (PDF text extraction, nullable-typed structured
-// output, and service_tier=priority all verified working) before this was
-// written.
+// Mirrors invokeGemini's interface (prompt, files, schema, label in; parsed
+// JSON or text out) so both providers can be raced identically by
+// runProviderLane below. Uses the Responses API: input_file (base64
+// file_data) for PDFs, input_image (base64 image_url) for images -
+// confirmed live against the real API (PDF text extraction, nullable-typed
+// structured output, and service_tier=priority all verified working)
+// before this was written.
 async function invokeOpenAI({ prompt, files = [], schema = null, label = 'openai' }) {
   if (!OPENAI_API_KEY) {
     throw new Error('OPENAI_API_KEY is not configured');
@@ -258,9 +260,6 @@ async function invokeOpenAI({ prompt, files = [], schema = null, label = 'openai
 }
 
 async function invokeGemini({ model, prompt, files = [], schema = null, label = 'gemini' }) {
-  if (AI_PROVIDER === 'openai') {
-    return await invokeOpenAI({ prompt, files, schema, label });
-  }
   if (!GEMINI_API_KEY) {
     throw new Error(`GEMINI_API_KEY is not configured (${GEMINI_SECRET_STATUS})`);
   }
@@ -345,55 +344,86 @@ function getGeminiErrorDetails(error) {
   return { message, status, isTransient, isContractError: false };
 }
 
-// Hedged/raced requests: fires GEMINI_RACE_COUNT identical calls to the
-// model in parallel and returns whichever one finishes first via
-// Promise.any. Each racer independently retries its own 503/transient
-// failures (up to GEMINI_RACER_MAX_ATTEMPTS) without blocking the others —
-// one racer hitting a capacity error just falls out of the race, it doesn't
-// stall the request. This deliberately trades Gemini call volume (up to
-// GEMINI_RACE_COUNT × GEMINI_RACER_MAX_ATTEMPTS calls for what used to be a
-// single call) for lower tail latency: a slow/overloaded individual call is
-// far more common in practice than genuine account-level rate limiting, so
-// racing past it wins more often than it costs.
-// Configurable via secret (RACE_COUNT) so concurrency can be dialed down for
-// testing (5 -> 3 -> 1) without a redeploy per step. Clamped to >= 1 so a
-// bad/empty value cannot silently disable racing to 0 parallel calls.
-const GEMINI_RACE_COUNT = Math.max(1, Number(Deno.env.get("RACE_COUNT")) || 5);
-const GEMINI_RACER_MAX_ATTEMPTS = 2;
+function invokeProvider(provider, options) {
+  return provider === 'openai' ? invokeOpenAI(options) : invokeGemini(options);
+}
 
-async function invokeGeminiRacer(options, racerLabel) {
-  let lastError;
-  for (let attempt = 1; attempt <= GEMINI_RACER_MAX_ATTEMPTS; attempt += 1) {
-    try {
-      return await invokeGemini({ ...options, label: racerLabel });
-    } catch (error) {
-      lastError = error;
-      const details = getGeminiErrorDetails(error);
-      if (!details.isTransient || attempt === GEMINI_RACER_MAX_ATTEMPTS) throw error;
-      console.warn(
-        `[${racerLabel}] attempt ${attempt} failed (${details.status || 'transient'}), retrying: ${details.message}`,
-      );
-      // Short jitter only — the other racers are already in flight, so this
-      // one doesn't need a long backoff to still have a chance of winning.
-      await new Promise((resolve) => setTimeout(resolve, 200 + Math.floor(Math.random() * 400)));
+// One worker per provider, not N identical workers racing one provider -
+// blind fan-out (the previous design) amplified load 5x per request, and
+// under real rate-limiting all 5 workers tend to fail TOGETHER (correlated,
+// same account-level limit), so it multiplied cost without buying
+// reliability. This hedges instead, per provider lane:
+//   - a transient/503 error retries immediately within the same lane
+//   - a worker that's simply slow (no error, no result after
+//     HEDGE_DELAY_MS) gets a same-provider hedge worker alongside it - the
+//     original keeps running too, whichever finishes first wins
+// MAX_ATTEMPTS_PER_LANE bounds total workers per lane regardless of which
+// rule triggered them, so a lane can't fan out unboundedly.
+const HEDGE_DELAY_MS = 45_000;
+const MAX_ATTEMPTS_PER_LANE = 4;
+
+function runProviderLane(provider, options, laneLabel) {
+  return new Promise((resolve, reject) => {
+    let attemptCount = 0;
+    let pendingCount = 0;
+    let settled = false;
+    let lastError;
+
+    function launchAttempt() {
+      if (settled || attemptCount >= MAX_ATTEMPTS_PER_LANE) return;
+      attemptCount += 1;
+      pendingCount += 1;
+      const attemptLabel = `${laneLabel}#${attemptCount}`;
+
+      const hedgeTimer = setTimeout(() => {
+        if (!settled) {
+          console.warn(`[${attemptLabel}] no result after ${HEDGE_DELAY_MS / 1000}s, starting a hedge worker`);
+          launchAttempt();
+        }
+      }, HEDGE_DELAY_MS);
+
+      invokeProvider(provider, { ...options, label: attemptLabel })
+        .then((result) => {
+          clearTimeout(hedgeTimer);
+          pendingCount -= 1;
+          if (!settled) {
+            settled = true;
+            resolve(result);
+          }
+        })
+        .catch((error) => {
+          clearTimeout(hedgeTimer);
+          pendingCount -= 1;
+          lastError = error;
+          if (settled) return;
+          const details = getGeminiErrorDetails(error);
+          if (details.isTransient && attemptCount < MAX_ATTEMPTS_PER_LANE) {
+            console.warn(`[${attemptLabel}] failed (${details.status || 'transient'}), retrying: ${details.message}`);
+            launchAttempt();
+          } else if (pendingCount === 0) {
+            // Nothing else from this lane is still in flight and nothing
+            // succeeded - only now does the lane give up.
+            settled = true;
+            reject(lastError);
+          }
+        });
     }
-  }
-  throw lastError;
+
+    launchAttempt();
+  });
 }
 
 async function invokeGeminiWithRetry(options) {
   const label = options.label || 'gemini';
-  const racers = Array.from({ length: GEMINI_RACE_COUNT }, (_, i) =>
-    invokeGeminiRacer(options, `${label}#${i + 1}`),
-  );
+  const lanes = ACTIVE_PROVIDERS.map((provider) => runProviderLane(provider, options, `${label}:${provider}`));
   try {
-    return await Promise.any(racers);
+    return await Promise.any(lanes);
   } catch (aggregateError) {
-    // Promise.any only rejects once every racer has exhausted its own
-    // attempts. Surface the first underlying Gemini error rather than the
-    // AggregateError wrapper, so callers see the same error shape as before.
+    // Promise.any only rejects once every provider lane has given up.
+    // Surface the first underlying error rather than the AggregateError
+    // wrapper, so callers see the same error shape as before.
     const underlying = aggregateError?.errors?.[0] || aggregateError;
-    console.warn(`[${label}] all ${GEMINI_RACE_COUNT} racers failed`);
+    console.warn(`[${label}] all providers (${ACTIVE_PROVIDERS.join(', ')}) failed`);
     throw underlying;
   }
 }
