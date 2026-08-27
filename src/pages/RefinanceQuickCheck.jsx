@@ -282,6 +282,10 @@ export default function RefinanceQuickCheck() {
   // שחולץ מהמסמך החדש תואם לשם שמילא בטופס הפרטים המקורי — כדי לתפוס העלאה
   // בטעות של מסמך של אדם אחר. לא נבדק בהעלאה הראשונה, רק בחזרה דרך הכפתור הזה.
   const [verifyBorrowerName, setVerifyBorrowerName] = useState(false);
+  // כשהניתוח הצליח אבל השם שחולץ לא תואם לשם שהוזן בטופס, שומרים כאן את
+  // תוצאת הניתוח (שכבר קיימת ותקינה) כדי לאפשר למשתמש לאשר בכל זאת שזה
+  // המסמך הנכון ולהמשיך בלי להעלות מחדש.
+  const [nameMismatchPending, setNameMismatchPending] = useState(null);
   const [strategyMixes, setStrategyMixes] = useState([]);
   const [isCalculatingMixes, setIsCalculatingMixes] = useState(false);
   const [mixCalculationError, setMixCalculationError] = useState('');
@@ -544,10 +548,59 @@ export default function RefinanceQuickCheck() {
       setFiles([selectedFiles[0]]); // רק קובץ אחד
     }
     setError(null);
+    setNameMismatchPending(null);
   };
 
   const removeFile = (index) => {
     setFiles(files.filter((_, i) => i !== index));
+  };
+
+  // משותף בין נתיב ההצלחה הרגיל, נתיב ההצלחה אחרי ריטריי, ואישור ידני של
+  // התאמת שם — בכל השלושה יש כבר תוצאת ניתוח תקינה שרק צריך לשמור ולהציג.
+  const finalizeAnalysis = async (data, file_url, externalDebtsInput) => {
+    const { mixCalculationContext, ...publicAnalysis } = data;
+    setStrategyMixes([]);
+    setMixCalculationError('');
+    await updateLead({
+      status: 'analyzed',
+      file_url,
+      has_extra_debts: hasExtraDebts,
+      external_debts: externalDebtsInput,
+      analysis_result: publicAnalysis,
+      mix_calculation_context: mixCalculationContext,
+      strategy_mix_results: {},
+      analyzed_at: new Date().toISOString()
+    });
+    setAnalysisResult({ ...publicAnalysis, file_url });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  // השם שחולץ מהמסמך לא תואם לשם שהוזן בטופס. שומרים את תוצאת הניתוח
+  // (שכבר קיימת ותקינה) בצד, כדי שכפתור "אני בטוח שזה המסמך הנכון" יוכל
+  // להמשיך איתה ישירות בלי לבקש העלאה חוזרת של הקובץ.
+  const handleNameMismatch = (data, file_url, externalDebtsInput) => {
+    setError(`❌ השם שחולץ מהמסמך שהעלית אינו תואם לשם שהוזן בתחילת התהליך (${contactFullName}). ודא שהעלית את המסמך של האדם הנכון.`);
+    setNameMismatchPending({ data, file_url, externalDebtsInput });
+    updateLead({
+      status: 'error',
+      file_url,
+      has_extra_debts: hasExtraDebts,
+      external_debts: externalDebtsInput
+    });
+  };
+
+  const handleConfirmNameMismatch = async () => {
+    if (!nameMismatchPending) return;
+    const { data, file_url, externalDebtsInput } = nameMismatchPending;
+    setIsAnalyzing(true);
+    setError(null);
+    setNameMismatchPending(null);
+    setVerifyBorrowerName(false);
+    try {
+      await finalizeAnalysis(data, file_url, externalDebtsInput);
+    } finally {
+      setIsAnalyzing(false);
+    }
   };
 
   const handleAnalyze = async () => {
@@ -557,6 +610,7 @@ export default function RefinanceQuickCheck() {
     }
 
     setError(null);
+    setNameMismatchPending(null);
     setDemoDocumentOverride(false);
     setIsAnalyzing(true);
 
@@ -598,32 +652,11 @@ export default function RefinanceQuickCheck() {
       }
 
       if (verifyBorrowerName && !borrowerNameMatchesContact(data.currentLoan?.borrowers_names, contactFullName)) {
-        setError(`❌ השם שחולץ מהמסמך שהעלית אינו תואם לשם שהוזן בתחילת התהליך (${contactFullName}). ודא שהעלית את המסמך של האדם הנכון.`);
-        updateLead({
-          status: 'error',
-          file_url,
-          has_extra_debts: hasExtraDebts,
-          external_debts: externalDebtsInput
-        });
+        handleNameMismatch(data, file_url, externalDebtsInput);
         return;
       }
       setVerifyBorrowerName(false);
-
-      const { mixCalculationContext, ...publicAnalysis } = data;
-      setStrategyMixes([]);
-      setMixCalculationError('');
-      await updateLead({
-        status: 'analyzed',
-        file_url,
-        has_extra_debts: hasExtraDebts,
-        external_debts: externalDebtsInput,
-        analysis_result: publicAnalysis,
-        mix_calculation_context: mixCalculationContext,
-        strategy_mix_results: {},
-        analyzed_at: new Date().toISOString()
-      });
-      setAnalysisResult({ ...publicAnalysis, file_url });
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      await finalizeAnalysis(data, file_url, externalDebtsInput);
 
     } catch (err) {
       console.error('Analysis error:', err);
@@ -649,25 +682,11 @@ export default function RefinanceQuickCheck() {
             throw new Error(retryData?.error || 'שגיאה בניתוח הקובץ');
           }
           if (verifyBorrowerName && !borrowerNameMatchesContact(retryData.currentLoan?.borrowers_names, contactFullName)) {
-            throw new Error(`השם שחולץ מהמסמך שהעלית אינו תואם לשם שהוזן בתחילת התהליך (${contactFullName}). ודא שהעלית את המסמך של האדם הנכון.`);
+            handleNameMismatch(retryData, file_url, externalDebtsInput);
+            return;
           }
           setVerifyBorrowerName(false);
-
-          const { mixCalculationContext, ...publicAnalysis } = retryData;
-          setStrategyMixes([]);
-          setMixCalculationError('');
-          await updateLead({
-            status: 'analyzed',
-            file_url,
-            has_extra_debts: hasExtraDebts,
-            external_debts: externalDebtsInput,
-            analysis_result: publicAnalysis,
-            mix_calculation_context: mixCalculationContext,
-            strategy_mix_results: {},
-            analyzed_at: new Date().toISOString()
-          });
-          setAnalysisResult({ ...publicAnalysis, file_url });
-          window.scrollTo({ top: 0, behavior: 'smooth' });
+          await finalizeAnalysis(retryData, file_url, externalDebtsInput);
           return;
         } catch (retryErr) {
           finalMessage = retryErr?.message || finalMessage;
@@ -697,6 +716,7 @@ export default function RefinanceQuickCheck() {
     setMixCalculationError('');
     setFiles([]);
     setError(null);
+    setNameMismatchPending(null);
     setShowAdvancedAnalysis(false);
     setIsDownloadingPdf(false);
     setDemoDocumentOverride(false);
@@ -710,6 +730,7 @@ export default function RefinanceQuickCheck() {
     setMixCalculationError('');
     setFiles([]);
     setError(null);
+    setNameMismatchPending(null);
     setShowAdvancedAnalysis(false);
     setIsDownloadingPdf(false);
     setDemoDocumentOverride(false);
@@ -1090,9 +1111,26 @@ export default function RefinanceQuickCheck() {
               )}
 
               {error && (
-                <div className="bg-red-50 border border-red-300 rounded-xl p-4 flex items-start gap-3">
-                  <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
-                  <p className="text-sm text-red-700">{error}</p>
+                <div className="bg-red-50 border border-red-300 rounded-xl p-4 flex flex-col gap-3">
+                  <div className="flex items-start gap-3">
+                    <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+                    <p className="text-sm text-red-700">{error}</p>
+                  </div>
+                  {nameMismatchPending && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={handleConfirmNameMismatch}
+                      disabled={isAnalyzing}
+                      className="w-full rounded-full border-red-300 text-red-700 hover:bg-red-100"
+                    >
+                      {isAnalyzing ? (
+                        <><Loader2 className="w-4 h-4 ml-2 animate-spin" /> ממשיך...</>
+                      ) : (
+                        'אני בטוח שזה המסמך הנכון'
+                      )}
+                    </Button>
+                  )}
                 </div>
               )}
 
