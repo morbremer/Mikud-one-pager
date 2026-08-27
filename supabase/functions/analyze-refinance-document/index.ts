@@ -115,7 +115,7 @@ class GeminiContractError extends Error {
 // JSON.parse. `responseJsonSchema` — not `responseSchema` — is the correct field
 // here: these schemas use standard JSON Schema nullable type arrays
 // (`type: ["string", "null"]`), which the OpenAPI-subset `responseSchema` rejects.
-async function invokeGemini({ model, prompt, files = [], schema = null }) {
+async function invokeGemini({ model, prompt, files = [], schema = null, label = 'gemini' }) {
   if (!GEMINI_API_KEY) {
     throw new Error(`GEMINI_API_KEY is not configured (${GEMINI_SECRET_STATUS})`);
   }
@@ -132,15 +132,29 @@ async function invokeGemini({ model, prompt, files = [], schema = null }) {
     config.responseJsonSchema = schema;
   }
 
-  const result = await withTimeout(
-    ai.models.generateContent({
-      model,
-      contents: [{ role: 'user', parts }],
-      config,
-    }),
-    GEMINI_CALL_TIMEOUT_MS,
-    `Gemini call exceeded ${Math.round(GEMINI_CALL_TIMEOUT_MS / 1000)}s`,
-  );
+  // Diagnostic-only timing (no behavior change). Every real Gemini call this
+  // request makes is logged with its own wall-clock duration, so a slow
+  // request can be pinned to a specific call from the Supabase function logs
+  // instead of guessed at. Added while investigating reported slow refinance
+  // analyses.
+  const callStartedAt = Date.now();
+  let result;
+  try {
+    result = await withTimeout(
+      ai.models.generateContent({
+        model,
+        contents: [{ role: 'user', parts }],
+        config,
+      }),
+      GEMINI_CALL_TIMEOUT_MS,
+      `Gemini call exceeded ${Math.round(GEMINI_CALL_TIMEOUT_MS / 1000)}s`,
+    );
+  } catch (error) {
+    const failedAfter = ((Date.now() - callStartedAt) / 1000).toFixed(1);
+    console.warn(`⏱️ [${label}] Gemini call FAILED after ${failedAfter}s (model=${model}): ${error?.message || error}`);
+    throw error;
+  }
+  console.log(`⏱️ [${label}] Gemini call took ${((Date.now() - callStartedAt) / 1000).toFixed(1)}s (model=${model})`);
   const text = result.text || '';
   if (!schema) return text;
 
@@ -187,6 +201,7 @@ function getGeminiErrorDetails(error) {
 }
 
 async function invokeGeminiWithRetry(options) {
+  const label = options.label || 'gemini';
   let lastError;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
@@ -201,12 +216,12 @@ async function invokeGeminiWithRetry(options) {
       // carrying the full document, so blind retry can tip a rate limit on its
       // own and still cannot succeed.
       if (!details.isTransient) {
-        console.warn(`Gemini attempt ${attempt} failed permanently: ${details.message}`);
+        console.warn(`[${label}] Gemini attempt ${attempt} failed permanently: ${details.message}`);
         break;
       }
       const retryDelayMs = 3000 + Math.floor(Math.random() * 1500);
       console.warn(
-        `Gemini attempt ${attempt} failed; retrying once in ${retryDelayMs}ms: ${details.message}`,
+        `[${label}] Gemini attempt ${attempt} failed; retrying once in ${retryDelayMs}ms: ${details.message}`,
       );
       await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
     }
@@ -222,6 +237,7 @@ Deno.serve(async (req) => {
     return jsonResponse({ error: 'Method not allowed' }, { status: 405 });
   }
 
+  const requestStartedAt = Date.now();
   try {
     // This public quick-check flow intentionally has no application-auth gate.
 
@@ -246,6 +262,7 @@ Deno.serve(async (req) => {
       mimeType: fileResponse.headers.get('content-type')?.split(';')[0] || guessMimeType(file_url),
       data: bytesToBase64(fileBytes),
     };
+    console.log(`⏱️ File downloaded (${fileBytes.length} bytes) at +${((Date.now() - requestStartedAt) / 1000).toFixed(1)}s`);
 
     console.log(`📋 Transaction Type: ${transaction_type}`);
 
@@ -524,12 +541,14 @@ Only extract what you can clearly read. Return null if unclear.`;
           prompt: UNIVERSAL_EXTRACTION_PROMPT,
           files: [documentFile],
           schema: EXTRACTION_SCHEMA,
+          label: 'extraction',
         }),
         invokeGeminiWithRetry({
           model: GEMINI_MODEL,
           prompt: IDENTITY_PROMPT,
           files: [documentFile],
           schema: IDENTITY_SCHEMA,
+          label: 'identity',
         }),
       ]);
 
@@ -572,7 +591,8 @@ Only extract what you can clearly read. Return null if unclear.`;
           model: GEMINI_MODEL,
           prompt: UNIVERSAL_EXTRACTION_PROMPT,
           files: [documentFile],
-          schema: EXTRACTION_SCHEMA
+          schema: EXTRACTION_SCHEMA,
+          label: 'fallback-retry',
         });
         if (retryResult.remaining_balance > 0 || (retryResult.tracks && retryResult.tracks.length > 0)) {
           Object.assign(extractionResult, retryResult);
@@ -755,6 +775,7 @@ Only extract what you can clearly read. Return null if unclear.`;
       try {
         const retry = await invokeGeminiWithRetry({
           model: GEMINI_MODEL,
+          label: 'track-retry',
           prompt: `This is an Israeli mortgage payoff statement. I need to find all individual loan tracks (מסלולים/הלוואות).
 The document shows balance ₪${actualRemainingBalance.toLocaleString()} total.
 Find EACH individual track and extract:
@@ -1642,5 +1663,7 @@ Today: ${today}`,
       ? 'שגיאה בניתוח המסמך. ודא שהקובץ הוא PDF או תמונה ברורים וקריאים ונסה שוב.'
       : (geminiError.message || 'שגיאה בניתוח. נסה שוב.');
     return jsonResponse({ success: false, error: userMessage }, { status: 200 });
+  } finally {
+    console.log(`⏱️ TOTAL request time: ${((Date.now() - requestStartedAt) / 1000).toFixed(1)}s`);
   }
 });
