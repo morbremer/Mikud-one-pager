@@ -14,7 +14,7 @@ import {
 } from '@/utils/refinanceMixState';
 import {
   Upload, Loader2, DollarSign,
-  CheckCircle, AlertCircle, TrendingUp, X, ChevronDown, ChevronUp, ChevronLeft, Download, Sparkle, Info
+  CheckCircle, AlertCircle, TrendingUp, X, ChevronDown, ChevronUp, ChevronLeft, Download, Info
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Popover, PopoverTrigger, PopoverContent, PopoverClose } from '@/components/ui/popover';
@@ -318,8 +318,12 @@ export default function RefinanceQuickCheck() {
   // Keep the values as strings while editing so PremiumInput can apply its
   // existing currency formatting without losing an in-progress value.
   const [monthlyIncome, setMonthlyIncome] = useState('');
+  // ההכנסה שהתמהילים הנוכחיים חושבו לפיה — מאפשר לזהות שינוי ולהפעיל חישוב מחדש.
+  const [savedIncome, setSavedIncome] = useState('');
   const [propertyPurchasePrice, setPropertyPurchasePrice] = useState('');
   const [estimatedCurrentPropertyValue, setEstimatedCurrentPropertyValue] = useState('');
+  // שווי הנכס ששמור כעת ב-lead — לזיהוי עריכה חיה במסך התוצאות.
+  const [savedPropertyValue, setSavedPropertyValue] = useState('');
   const [financialDetailsTouched, setFinancialDetailsTouched] = useState({});
   const [financialDetailsError, setFinancialDetailsError] = useState('');
   const [isSubmittingFinancialDetails, setIsSubmittingFinancialDetails] = useState(false);
@@ -349,8 +353,10 @@ export default function RefinanceQuickCheck() {
         setContactConsent(Boolean(lead.contact_consent));
         setTermsAccepted(Boolean(lead.terms_accepted));
         setMonthlyIncome(lead.monthly_income?.toString() || '');
+        setSavedIncome(lead.monthly_income?.toString() || '');
         setPropertyPurchasePrice(lead.property_purchase_price?.toString() || '');
         setEstimatedCurrentPropertyValue(lead.estimated_current_property_value?.toString() || '');
+        setSavedPropertyValue(lead.estimated_current_property_value?.toString() || '');
         setHasFinancialDetails(
           Number(lead.monthly_income) > 0 && Number(lead.property_purchase_price) > 0
         );
@@ -521,6 +527,49 @@ export default function RefinanceQuickCheck() {
       setIsCalculatingMixes(false);
     }
   };
+  // עדכון ההכנסה מתוך מסך התוצאות: שומרים ל-lead ומחשבים את התמהילים מחדש,
+  // כך שבדיקת יחס ההחזר (40%) תשקף את ההכנסה החדשה.
+  const handleUpdateIncome = async () => {
+    if (!leadId || Number(monthlyIncome) <= 0 || monthlyIncome === savedIncome) return;
+    setMixCalculationError('');
+    try {
+      const updatedLead = await refinanceLeads.update(leadId, { monthly_income: Number(monthlyIncome) });
+      if (!updatedLead) throw new Error('The refinance lead income was not updated');
+      setSavedIncome(monthlyIncome);
+    } catch (err) {
+      console.error('Failed to update monthly income:', err);
+      setMixCalculationError('לא הצלחנו לעדכן את ההכנסה. נסו שוב.');
+      return;
+    }
+    await handleCalculateMixes();
+  };
+  // שווי הנכס אינו משפיע על התמהילים עצמם — רק נשמר ל-lead לצורך הרישום.
+  const handleUpdatePropertyValue = async () => {
+    if (!leadId || estimatedCurrentPropertyValue === savedPropertyValue) return;
+    try {
+      const updatedLead = await refinanceLeads.update(leadId, {
+        estimated_current_property_value: estimatedCurrentPropertyValue ? Number(estimatedCurrentPropertyValue) : null
+      });
+      if (!updatedLead) throw new Error('The refinance lead property value was not updated');
+      setSavedPropertyValue(estimatedCurrentPropertyValue);
+    } catch (err) {
+      console.error('Failed to update estimated property value:', err);
+    }
+  };
+  // עריכה חיה במסך התוצאות: החלת שינוי ההכנסה על התמהילים לאחר השהיה קצרה
+  // (debounce), כדי לא לשלוח קריאה על כל הקשה.
+  useEffect(() => {
+    if (!leadId || !analysisResult) return undefined;
+    if (Number(monthlyIncome) <= 0 || monthlyIncome === savedIncome) return undefined;
+    const timer = setTimeout(() => { handleUpdateIncome(); }, 700);
+    return () => clearTimeout(timer);
+  }, [monthlyIncome, savedIncome, leadId, analysisResult]);
+  useEffect(() => {
+    if (!leadId || !analysisResult) return undefined;
+    if (estimatedCurrentPropertyValue === savedPropertyValue) return undefined;
+    const timer = setTimeout(() => { handleUpdatePropertyValue(); }, 700);
+    return () => clearTimeout(timer);
+  }, [estimatedCurrentPropertyValue, savedPropertyValue, leadId, analysisResult]);
   const isFinancialDetailsValid = Object.keys(financialDetailsErrors).length === 0;
 
   const handleFinancialDetailsSubmit = async () => {
@@ -539,6 +588,8 @@ export default function RefinanceQuickCheck() {
           estimated_current_property_value: estimatedCurrentPropertyValue ? Number(estimatedCurrentPropertyValue) : null
         });
       if (!updatedLead) throw new Error('The refinance lead was not updated');
+      setSavedIncome(monthlyIncome);
+      setSavedPropertyValue(estimatedCurrentPropertyValue);
       setHasFinancialDetails(true);
     } catch (err) {
       console.error('Failed to save refinance financial details:', err);
@@ -581,6 +632,9 @@ export default function RefinanceQuickCheck() {
     });
     setAnalysisResult({ ...publicAnalysis, file_url });
     window.scrollTo({ top: 0, behavior: 'smooth' });
+    // התמהילים מחושבים אוטומטית — אין צורך בכפתור "חשב תמהילים".
+    // ההכנסה כבר נאספה בשלב הפרטים הפיננסיים, כך שמגבלת ה-DTI תיושם נכון.
+    await handleCalculateMixes();
   };
 
   // השם שחולץ מהמסמך לא תואם לשם שהוזן בטופס. שומרים את תוצאת הניתוח
@@ -1250,6 +1304,43 @@ export default function RefinanceQuickCheck() {
                         <p className="text-lg font-bold text-mist-900">{Math.round((analysisResult.currentLoan.remainingMonths || 0) / 12)} שנים</p>
                       </div>
                     </div>
+                    {/* עריכה חיה — שינוי ההכנסה מעדכן אוטומטית את התמהילים; שווי הנכס נשמר לרישום. */}
+                    <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className="rounded-xl p-3 border border-mist-200 bg-white/60">
+                        <label htmlFor="refinanceMonthlyIncomeResult" className="flex items-center gap-2 text-xs text-mist-500 mb-1">
+                          הכנסה חודשית נטו
+                          {isCalculatingMixes && <Loader2 className="h-3 w-3 animate-spin text-[#0153F4]" />}
+                        </label>
+                        <div className="relative">
+                          <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-mist-400">₪</span>
+                          <input
+                            id="refinanceMonthlyIncomeResult"
+                            type="number"
+                            inputMode="numeric"
+                            min="0"
+                            value={monthlyIncome}
+                            onChange={(e) => setMonthlyIncome(e.target.value)}
+                            className="w-full rounded-lg border border-mist-200 bg-white py-2 pr-8 pl-3 text-lg font-bold text-mist-900 focus:border-[#0153F4] focus:outline-none focus:ring-1 focus:ring-[#0153F4]"
+                          />
+                        </div>
+                        <p className="mt-1.5 text-[11px] text-mist-400">שינוי ההכנסה יעדכן את התמהילים.</p>
+                      </div>
+                      <div className="rounded-xl p-3 border border-mist-200 bg-white/60">
+                        <label htmlFor="refinancePropertyValueResult" className="block text-xs text-mist-500 mb-1">שווי נכס משוער</label>
+                        <div className="relative">
+                          <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-mist-400">₪</span>
+                          <input
+                            id="refinancePropertyValueResult"
+                            type="number"
+                            inputMode="numeric"
+                            min="0"
+                            value={estimatedCurrentPropertyValue}
+                            onChange={(e) => setEstimatedCurrentPropertyValue(e.target.value)}
+                            className="w-full rounded-lg border border-mist-200 bg-white py-2 pr-8 pl-3 text-lg font-bold text-mist-900 focus:border-[#0153F4] focus:outline-none focus:ring-1 focus:ring-[#0153F4]"
+                          />
+                        </div>
+                      </div>
+                    </div>
                   </div>
 
                   <motion.section
@@ -1480,25 +1571,20 @@ export default function RefinanceQuickCheck() {
                 )}
               </AnimatePresence>
 
-              <div className="text-center">
-                <button
-                  type="button"
-                  onClick={handleCalculateMixes}
-                  disabled={isCalculatingMixes}
-                  className="inline-flex h-14 min-w-56 items-center justify-center gap-2 rounded-full bg-[#0C084A] px-8 text-base font-black text-white shadow-md transition-all hover:bg-[#0153F4] active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {isCalculatingMixes ? (
-                    <><Loader2 className="h-5 w-5 animate-spin" /> מחשב תמהילים...</>
-                  ) : (
-                    <><Sparkle className="h-5 w-5" /> חשב תמהילים</>
+              {(isCalculatingMixes || mixCalculationError) && (
+                <div className="text-center">
+                  {isCalculatingMixes && (
+                    <p className="inline-flex items-center justify-center gap-2 text-base font-black text-[#0C084A]">
+                      <Loader2 className="h-5 w-5 animate-spin" /> מחשב תמהילים...
+                    </p>
                   )}
-                </button>
-                {mixCalculationError && (
-                  <p className="mx-auto mt-3 max-w-xl text-sm font-bold leading-relaxed text-red-600">
-                    {mixCalculationError}
-                  </p>
-                )}
-              </div>
+                  {!isCalculatingMixes && mixCalculationError && (
+                    <p className="mx-auto max-w-xl text-sm font-bold leading-relaxed text-red-600">
+                      {mixCalculationError}
+                    </p>
+                  )}
+                </div>
+              )}
 
               {analysisResult.savings?.feeWarning && (
                 <Card className="border border-red-500 bg-red-50">

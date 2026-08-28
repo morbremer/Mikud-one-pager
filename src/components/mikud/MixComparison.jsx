@@ -95,19 +95,15 @@ function MixCard({
   return (
     <div
       dir="rtl"
-      className={`relative rounded-3xl border overflow-hidden text-right ${isRecommended ? 'bg-periwinkle-100' : 'bg-white'} ${isValid ? meta.borderColor : 'border-red-300'} transition-all duration-500`}
+      className={`relative rounded-3xl border overflow-hidden text-right ${isRecommended ? 'bg-periwinkle-100' : 'bg-white'} ${isValid ? meta.borderColor : 'border-mist-200'} transition-all duration-500`}
     >
-      {/* שכבת אזהרה אם תמהיל לא תקין */}
+      {/* אזהרת כושר החזר — לא חוסמת: התמהיל נשאר גלוי, עם ההכנסה הנדרשת כדי לעמוד בו */}
       {!isValid && (
-        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-red-50/95 backdrop-blur-sm rounded-3xl p-6 text-center">
-          <div className="text-4xl mb-3">⛔</div>
-          <p className="text-red-700 font-black text-base mb-2">תמהיל זה חורג מכושר ההחזר שלך</p>
-          <p className="text-red-600/80 text-xs leading-relaxed">
-            ההחזר החודשי של תמהיל זה עולה על 40% מהכנסתך הפנויה — הבנק לא יאשר אותו בסטנדרט רגיל.
+        <div className="bg-mist-50 border-b border-mist-200 px-4 py-3 text-center">
+          <p className="text-mist-600 text-[11px] leading-relaxed">
+            כדי שהבנק יאשר תמהיל זה בסטנדרט רגיל נדרשת הכנסה נטו של{' '}
+            <strong className="font-black text-mist-900">₪{fmt(Math.ceil(totalPmt / 0.4))}</strong> לחודש.
           </p>
-          <div className="mt-4 px-4 py-2.5 rounded-xl bg-amber-50 border border-amber-300">
-            <p className="text-amber-700 text-[11px] font-bold">💡 ניתן לשקול מסלולים צמודי מדד בלבד, הגדלת הכנסות, או הקטנת סכום ההלוואה</p>
-          </div>
         </div>
       )}
 
@@ -277,6 +273,8 @@ export default function MixComparison({
         },
       ];
 
+  const anyMixExceedsDti = cards.some((card) => card.isValid === false);
+
   return (
     <div dir="rtl" className="space-y-6">
       {/* כותרת */}
@@ -285,6 +283,15 @@ export default function MixComparison({
           בחרו את המשכנתא שמתאימה לכם
         </h3>
       </div>
+
+      {/* הסבר כללי על יחס ההחזר — מוצג פעם אחת כשלפחות תמהיל אחד חורג */}
+      {anyMixExceedsDti && (
+        <div className="rounded-2xl bg-amber-50 border border-amber-300 p-4 text-center">
+          <p className="text-amber-800 text-sm leading-relaxed">
+            חשוב להכיר שלפי בנק ישראל, נדרש יחס החזר של 40% במשכנתא. כלומר, החזר המשכנתא החודשי לא יהווה מעל ל-40% מההכנסה החודשית.
+          </p>
+        </div>
+      )}
 
       {/* גריד הכרטיסים */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-start">
