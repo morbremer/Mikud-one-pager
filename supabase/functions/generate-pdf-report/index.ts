@@ -45,7 +45,9 @@ Deno.serve(async (req) => {
     const phone = esc(formData?.phone);
     const email = esc(formData?.email);
     const age = esc(formData?.age);
-    const loanDuration = esc(formData?.loanDuration);
+    // תקופת ההלוואה בפועל היא זו שחושבה (ולעיתים נחתכה לפי גיל/תקרת מקסימום),
+    // ולא בהכרח מה שהוקלד. מציגים את actualDuration כדי שהמכתב יתאים ללוח שחושב.
+    const loanDuration = esc(results?.actualDuration ?? formData?.loanDuration);
     const remainingYears = esc(results?.remainingYears);
     const score = esc(results?.score);
     const statusAction = esc(results?.status?.action);

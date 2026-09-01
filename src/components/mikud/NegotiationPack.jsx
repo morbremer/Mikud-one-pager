@@ -255,7 +255,7 @@ export default function NegotiationPack({ formData, results, selectedMix, fullNa
       <p className="text-sm sm:text-base text-mist-600 leading-relaxed text-center max-w-2xl mx-auto -mt-2 mb-2">
         {isRefinance
           ? `משא ומתן נכון הוא אחד הדברים הכי חשובים בתהליך המחזור. חיסכון של ₪${formatCurrency(results.totalSaving)} על פני ${results.remainingYears} שנים הוא בהחלט אפשרי. בדיוק בשביל זה הכנו לכם את ערכת המשא ומתן המקצועית שבעזרתה תוכלו להתמקח ולקבל את המשכנתא המשתלמת ביותר.`
-          : `משא ומתן נכון הוא אחד הדברים הכי חשובים בתהליך קבלת המשכנתא. הורדה של 0.5% בלבד בריבית הנוכחית שווה לחיסכון של ₪${formatCurrency(displayLoanAmount * 0.12)} על פני ${formData.loanDuration} שנים. בדיוק בשביל זה הכנו לכם את ערכת המשא ומתן המקצועית שבעזרתה תוכלו להתמקח ולקבל את המשכנתא המשתלמת ביותר.`
+          : `משא ומתן נכון הוא אחד הדברים הכי חשובים בתהליך קבלת המשכנתא. הורדה של 0.5% בלבד בריבית הנוכחית שווה לחיסכון של ₪${formatCurrency(displayLoanAmount * 0.12)} על פני ${results.actualDuration ?? formData.loanDuration} שנים. בדיוק בשביל זה הכנו לכם את ערכת המשא ומתן המקצועית שבעזרתה תוכלו להתמקח ולקבל את המשכנתא המשתלמת ביותר.`
         }
       </p>
 
@@ -397,7 +397,7 @@ export default function NegotiationPack({ formData, results, selectedMix, fullNa
                             </>
                           )}
                           <div className="flex gap-4"><span className="font-bold w-28 sm:w-40 shrink-0">{itemNum++}. אחוז מימון (LTV)</span><span className="text-black">{results.ltv?.toFixed(1)}% (תקרה: {formData.mortgageType === 'purchase_first' ? '75%' : formData.mortgageType === 'purchase_improve' ? '70%' : formData.mortgageType === 'purchase_additional' ? '50%' : formData.mortgageType === 'any_purpose' ? '50%' : '50%'})</span></div>
-                          <div className="flex gap-4"><span className="font-bold w-28 sm:w-40 shrink-0">{itemNum++}. תקופת הלוואה</span><span className="text-black">{formData.loanDuration} שנים</span></div>
+                          <div className="flex gap-4"><span className="font-bold w-28 sm:w-40 shrink-0">{itemNum++}. תקופת הלוואה</span><span className="text-black">{results.actualDuration ?? formData.loanDuration} שנים</span></div>
                           <div className="flex gap-4"><span className="font-bold w-28 sm:w-40 shrink-0">{itemNum++}. מטרת ההלוואה</span><span className="text-black">{{
                             purchase_first: 'רכישת דירה ראשונה',
                             purchase_improve: 'משפרי דיור / חליפית',

@@ -549,7 +549,7 @@ ${borrowersSummary}
 הון עצמי: ₪${Number(String(formData.equity||0).replace(/,/g,'')).toLocaleString()}
 LTV: ${results.ltv?.toFixed(1)}%
 ${!results.isReverse ? `DTI: ${results.dti?.toFixed(1)}% (תקן בנק ישראל: עד 40%)` : 'משכנתא הפוכה — ללא חובת DTI'}
-תקופה: ${formData.loanDuration} שנים
+תקופה: ${results.actualDuration ?? formData.loanDuration} שנים
 סוג עסקה: ${formData.mortgageType}
 חובות חודשיים קיימים: ₪${formatCurrency(Number(String(formData.monthlyDebts || 0).replace(/,/g, '')))}
 
@@ -650,7 +650,7 @@ ${results.score}/100
     const docsList = buildDocsList();
 
     const types = {
-      roadmap: { label: "אסטרטגיית חיסכון", prompt: `צור 3 טיפים אסטרטגיים מדויקים לחיסכון בריבית ו/או קיצור תקופת משכנתא של ₪${formatCurrency(results.loanAmount)} ל-${formData.loanDuration} שנים. ענה כרשימה ממוספרת נקייה בעברית.` },
+      roadmap: { label: "אסטרטגיית חיסכון", prompt: `צור 3 טיפים אסטרטגיים מדויקים לחיסכון בריבית ו/או קיצור תקופת משכנתא של ₪${formatCurrency(results.loanAmount)} ל-${results.actualDuration ?? formData.loanDuration} שנים. ענה כרשימה ממוספרת נקייה בעברית.` },
       negotiation: { label: "הכנה למשא ומתן", prompt: `צור 3 שאלות חדות ומקצועיות לבנקאי לשיפור תנאי משכנתא של ₪${formatCurrency(results.loanAmount)}, LTV ${results.ltv.toFixed(1)}%. ענה כרשימה ממוספרת בעברית.` },
       documents: { label: "רשימת מסמכים להגשה", prompt: docsList }
     };

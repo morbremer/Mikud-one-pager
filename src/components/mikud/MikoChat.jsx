@@ -82,7 +82,7 @@ const buildSystemPrompt = (formData, results, isPurchased, rates) => {
 סכום משכנתא מאושר: ₪${fmt(results?.loanAmount || 0)}${results?.requestedLoanAmount > results?.loanAmount ? ` (מבוקש: ₪${fmt(results.requestedLoanAmount)})` : ''}
 אחוז מימון (LTV): ${results?.ltv?.toFixed(1) || '?'}%
 יחס החזר (DTI): ${results?.isReverse ? 'לא רלוונטי (משכנתא הפוכה)' : (results?.dti?.toFixed(1) + '%' || '?')}
-תקופה: ${formData.loanDuration} שנים
+תקופה: ${results?.actualDuration ?? formData.loanDuration} שנים
 החזר חודשי מומלץ: ₪${fmt(Math.floor(results?.mixB?.total || 0))}
 ציון איכות: ${results?.score || '?'}/100
 מצב משפחתי: ${maritalMap[formData.maritalStatus] || 'לא צוין'}
