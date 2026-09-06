@@ -2,6 +2,7 @@ import { supabase } from '@/components/refinance/supabaseClient';
 
 const functionNames = {
   getBankOfIsraelRates: 'get-bank-of-israel-rates',
+  getReportPrice: 'get-report-price',
   sendEmailVerification: 'send-email-verification',
   verifyEmailCode: 'verify-email-code',
   createCardComPayment: 'create-cardcom-payment',

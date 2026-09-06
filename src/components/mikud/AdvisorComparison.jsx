@@ -1,5 +1,6 @@
 import React from 'react';
 import { Check, X, Minus, Crown } from 'lucide-react';
+import { useReportPrice } from '@/hooks/useReportPrice';
 
 // שלוש דרכים לקחת משכנתא — לבד / יועץ רגיל / מיקוד.
 // כל שורה היא קריטריון; ערך התא הוא true (✓), false (✗), 'partial' (◦) או טקסט.
@@ -14,7 +15,7 @@ const rows = [
     criterion: 'עלות',
     alone: 'חינם — אבל עלול לעלות ביוקר',
     advisor: '~₪6,000–₪10,000',
-    mikud: '₪499 בלבד',
+    mikud: null, // מוזרק דינמית לפי מחיר הדוח (useReportPrice)
   },
   {
     criterion: 'אובייקטיביות / ללא ניגוד עניינים',
@@ -76,6 +77,13 @@ function Cell({ value, highlight }) {
 }
 
 export default function AdvisorComparison() {
+  const reportPrice = useReportPrice();
+  // מזריקים את מחיר הדוח לשורת "עלות" כדי שיישאר מסונכרן עם החיוב בפועל.
+  const displayRows = rows.map((row) =>
+    row.criterion === 'עלות'
+      ? { ...row, mikud: `₪${reportPrice.toLocaleString('he-IL')} בלבד` }
+      : row
+  );
   return (
     <div
       className="bg-mist-50 p-4 sm:p-6 md:p-8 rounded-3xl border border-mist-200 mb-6 sm:mb-10 text-right animate-in fade-in slide-in-from-bottom-4 duration-500"
@@ -115,7 +123,7 @@ export default function AdvisorComparison() {
         </div>
 
         {/* שורות */}
-        {rows.map((row, i) => (
+        {displayRows.map((row, i) => (
           <div
             key={i}
             className="grid grid-cols-[1.4fr_repeat(3,1fr)] sm:grid-cols-[2fr_repeat(3,1fr)] border-t border-mist-100"

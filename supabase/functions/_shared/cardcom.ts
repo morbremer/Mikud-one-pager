@@ -1,6 +1,12 @@
 import { service } from './supabase.ts';
 
 const amount = Number(Deno.env.get('CARDCOM_AMOUNT') || '1');
+
+// המחיר שמוצג בממשק חייב להיות זהה למה שנגבה בפועל. נחשף דרך הפונקציה
+// get-report-price כדי שה-UI יקרא את אותו מקור אמת (הסוד CARDCOM_AMOUNT).
+export function getReportAmount() {
+  return amount;
+}
 const createUrl = 'https://secure.cardcom.solutions/api/v11/LowProfile/Create';
 const resultUrl = 'https://secure.cardcom.solutions/api/v11/LowProfile/GetLpResult';
 
