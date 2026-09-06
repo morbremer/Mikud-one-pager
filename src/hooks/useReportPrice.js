@@ -1,30 +1,45 @@
 import { useState, useEffect } from 'react';
 import { appClient } from '@/api/appClient';
 
-// מחיר ברירת מחדל לתצוגה עד שהבקשה לשרת חוזרת (ואם היא נכשלת), כדי שהמחיר
-// לא יופיע ריק. מקור האמת בפועל הוא הסוד CARDCOM_AMOUNT שנקרא דרך get-report-price.
-const FALLBACK_PRICE = 499;
-
 /**
- * קורא את מחיר הדוח מהשרת (מאותו מקור שממנו נגבה החיוב), כך שכל מקום שמציג
- * את המחיר יישאר מסונכרן עם הסכום שייגבה בפועל. מחזיר מספר בשקלים.
+ * מחיר הדוח נקרא תמיד מהשרת (get-report-price), מאותו מקור שממנו נגבה החיוב
+ * (הסוד CARDCOM_AMOUNT). אין מחיר קשיח ב-UI — כל עוד המחיר לא נטען מציגים
+ * מצב טעינה, כדי שלעולם לא יוצג מספר שאינו המחיר האמיתי.
+ *
+ * מחזיר { price, status }:
+ *   price  — המחיר בשקלים, או null עד שנטען.
+ *   status — 'loading' | 'ready' | 'error'.
  */
 export function useReportPrice() {
-  const [price, setPrice] = useState(FALLBACK_PRICE);
+  const [price, setPrice] = useState(null);
+  const [status, setStatus] = useState('loading');
 
   useEffect(() => {
     let active = true;
-    (async () => {
+    let timer;
+    let attempts = 0;
+
+    const attempt = async () => {
       try {
         const { data } = await appClient.functions.invoke('getReportPrice');
         const amount = Number(data?.amount);
-        if (active && Number.isFinite(amount) && amount > 0) setPrice(amount);
+        if (!Number.isFinite(amount) || amount <= 0) throw new Error('Invalid price payload');
+        if (active) { setPrice(amount); setStatus('ready'); }
       } catch (err) {
         console.error('Failed to load report price:', err);
+        if (!active) return;
+        attempts += 1;
+        if (attempts < 4) {
+          timer = setTimeout(attempt, 1500 * attempts); // backoff, then keep trying
+        } else {
+          setStatus('error');
+        }
       }
-    })();
-    return () => { active = false; };
+    };
+
+    attempt();
+    return () => { active = false; clearTimeout(timer); };
   }, []);
 
-  return price;
+  return { price, status };
 }

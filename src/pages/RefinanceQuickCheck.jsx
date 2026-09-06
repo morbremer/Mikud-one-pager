@@ -274,7 +274,7 @@ function CelebratingSavingsAmount({ value }) {
 }
 
 export default function RefinanceQuickCheck() {
-  const reportPrice = useReportPrice();
+  const { price: reportPrice } = useReportPrice();
   const [files, setFiles] = useState([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState(null);
@@ -1404,9 +1404,9 @@ export default function RefinanceQuickCheck() {
                       {paymentNotice && <p className="mt-2 text-[#0C084A] font-bold text-xs leading-relaxed">{paymentNotice}</p>}
                     </div>
                     <div className="flex flex-col sm:flex-row gap-2 flex-shrink-0">
-                      <button onClick={handlePurchaseClick} disabled={paymentLoading} className="bg-[#0C084A] text-white px-6 py-3 rounded-full font-black text-sm shadow-lg hover:bg-[#1362FF] hover:text-[#06042A] transition-all whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2">
-                        {paymentLoading && <Loader2 size={16} className="animate-spin" />}
-                        רכוש דוח ₪{reportPrice.toLocaleString('he-IL')}
+                      <button onClick={handlePurchaseClick} disabled={paymentLoading || reportPrice == null} className="bg-[#0C084A] text-white px-6 py-3 rounded-full font-black text-sm shadow-lg hover:bg-[#1362FF] hover:text-[#06042A] transition-all whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2">
+                        {(paymentLoading || reportPrice == null) && <Loader2 size={16} className="animate-spin" />}
+                        רכוש דוח{reportPrice != null ? ` ₪${reportPrice.toLocaleString('he-IL')}` : ''}
                       </button>
                       {PAYMENT_BYPASS_ENABLED && (
                         <button onClick={handlePaymentBypass} className="border border-[#0153F4] text-[#0C084A] px-5 py-3 rounded-full font-bold text-sm hover:bg-white transition-all whitespace-nowrap">

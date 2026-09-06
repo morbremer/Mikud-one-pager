@@ -77,11 +77,12 @@ function Cell({ value, highlight }) {
 }
 
 export default function AdvisorComparison() {
-  const reportPrice = useReportPrice();
-  // מזריקים את מחיר הדוח לשורת "עלות" כדי שיישאר מסונכרן עם החיוב בפועל.
+  const { price: reportPrice } = useReportPrice();
+  // מזריקים את מחיר הדוח (שנקרא מהשרת) לשורת "עלות". עד שהמחיר נטען מציגים
+  // מציין טעינה במקום מספר קשיח.
   const displayRows = rows.map((row) =>
     row.criterion === 'עלות'
-      ? { ...row, mikud: `₪${reportPrice.toLocaleString('he-IL')} בלבד` }
+      ? { ...row, mikud: reportPrice != null ? `₪${reportPrice.toLocaleString('he-IL')} בלבד` : '…' }
       : row
   );
   return (
